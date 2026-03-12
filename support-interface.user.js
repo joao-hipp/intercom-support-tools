@@ -9,6 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.intercom.io
+
 // @updateURL    https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js
 // @downloadURL  https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js
 // ==/UserScript==
@@ -974,4 +975,6 @@
       }
     };
   } catch (_) {}
+
+})();
 })();
