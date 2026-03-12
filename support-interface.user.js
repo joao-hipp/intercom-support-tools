@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.6.1
+// @version      1.0.0
 // @description  Personal queue health dashboard — dataset-per-metric architecture
 // @match        https://app.intercom.com/*
 // @run-at       document-start
