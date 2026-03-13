@@ -9,8 +9,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.intercom.io
-// @updateURL    https://raw.githubusercontent.com/<org>/<repo>/main/support-interface.meta.js
-// @downloadURL  https://raw.githubusercontent.com/<org>/<repo>/main/support-interface.user.js
+// @updateURL    https://github.com/joao-hipp/intercom-support-tools/raw/refs/heads/main/support-interface.meta.js
+// @downloadURL  https://github.com/joao-hipp/intercom-support-tools/raw/refs/heads/main/support-interface.user.js
 // ==/UserScript==
 
 (function () {
