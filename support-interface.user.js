@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.0.0
+// @version      2.2.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -26,6 +26,8 @@
   const STORAGE_ADMIN_NAME = 'sii_admin_name';
   const STORAGE_DISMISSED  = 'sii_dismissed';
   const STORAGE_REFRESH    = 'sii_refresh_mins';
+  const STORAGE_COLUMNS    = 'sii_columns';
+  const STORAGE_FILTERS    = 'sii_filters';
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
@@ -49,9 +51,73 @@
   const F_REPLIED_TODAY    = 'repliedToday';
   const F_REPLIED_WEEK     = 'repliedThisWeek';
   const F_CLOSED_WEEK      = 'closedThisWeek';
+  const F_UNASSIGNED       = 'unassigned';
 
   // Filters that support the dismiss feature
   const DISMISSABLE_FILTERS = new Set([F_BACKLOG, F_SLA_BREACHED, F_SLA_WARNING]);
+
+  // All filter card definitions (order = default display order)
+  const ALL_FILTER_CARDS = [
+    { key: F_BACKLOG,        label: null,                  sub: 'open conversations', cls: '',        required: true  },
+    { key: F_SLA_BREACHED,   label: 'SLA Breached',        sub: 'past deadline',      cls: 'danger',  required: false },
+    { key: F_SLA_WARNING,    label: 'SLA Warning',         sub: '< 2h remaining',     cls: 'warning', required: false },
+    { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no owner or team',   cls: 'teal',    required: false },
+    { key: F_ASSIGNED_TODAY, label: 'Assigned Today',      sub: 'new assignments',    cls: 'info',    required: false },
+    { key: F_ASSIGNED_WEEK,  label: 'Assigned This Week',  sub: 'since Sunday',       cls: 'info',    required: false },
+    { key: F_REPLIED_TODAY,  label: 'Replied Today',       sub: 'my replies only',    cls: 'green',   required: false },
+    { key: F_REPLIED_WEEK,   label: 'Replied This Week',   sub: 'since Sunday',       cls: 'green',   required: false },
+    { key: F_CLOSED_WEEK,    label: 'Closed This Week',    sub: 'since Sunday',       cls: 'purple',  required: false },
+  ];
+
+  // ---------------------------------------------------------------------------
+  // Column definitions
+  // ---------------------------------------------------------------------------
+
+  const ALL_COLUMNS = [
+    { id: 'id',       label: '#',                required: true },
+    { id: 'subject',  label: 'Subject / Preview' },
+    { id: 'sla',      label: 'SLA' },
+    { id: 'urgency',  label: 'Urgency' },
+    { id: 'priority', label: 'Priority' },
+    { id: 'created',  label: 'Created' },
+    { id: 'updated',  label: 'Updated' },
+  ];
+
+  const DEFAULT_COL_IDS = ['id', 'subject', 'sla', 'created', 'updated'];
+
+  function loadColumnPrefs() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_COLUMNS));
+      if (Array.isArray(saved) && saved.length >= 2) {
+        const validIds = new Set(ALL_COLUMNS.map(c => c.id));
+        const filtered = saved.filter(id => validIds.has(id));
+        const required = ALL_COLUMNS.filter(c => c.required).map(c => c.id);
+        if (required.every(id => filtered.includes(id))) return filtered;
+      }
+    } catch (_) {}
+    return [...DEFAULT_COL_IDS];
+  }
+
+  function saveColumnPrefs(cols) {
+    localStorage.setItem(STORAGE_COLUMNS, JSON.stringify(cols));
+  }
+
+  function loadFilterPrefs() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_FILTERS));
+      if (Array.isArray(saved) && saved.length >= 1) {
+        const validKeys = new Set(ALL_FILTER_CARDS.map(c => c.key));
+        const filtered = saved.filter(k => validKeys.has(k));
+        const required = ALL_FILTER_CARDS.filter(c => c.required).map(c => c.key);
+        if (required.every(k => filtered.includes(k))) return filtered;
+      }
+    } catch (_) {}
+    return ALL_FILTER_CARDS.map(c => c.key);
+  }
+
+  function saveFilterPrefs(keys) {
+    localStorage.setItem(STORAGE_FILTERS, JSON.stringify(keys));
+  }
 
   // ---------------------------------------------------------------------------
   // State
@@ -60,16 +126,20 @@
   const datasets = {
     [F_BACKLOG]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
     [F_REPLIED_TODAY]: [], [F_REPLIED_WEEK]: [], [F_CLOSED_WEEK]: [],
+    [F_UNASSIGNED]: [],
   };
 
-  // Dismissed conversation IDs — persisted in localStorage so they survive modal close.
-  // Cleared on every refresh so they re-enter normal filtering.
   let dismissedIds = new Set(JSON.parse(localStorage.getItem(STORAGE_DISMISSED) || '[]'));
 
   let currentAdminId   = localStorage.getItem(STORAGE_ADMIN_ID)   || null;
   let currentAdminName = localStorage.getItem(STORAGE_ADMIN_NAME) || null;
   let activeFilter  = F_BACKLOG;
   let sortMode      = 'sla_asc';
+  let urgencyFilter = null;
+  let activeColumns = loadColumnPrefs();
+  let colMgrVisible = false;
+  let activeFilterCards = loadFilterPrefs();
+  let filterMgrVisible = false;
   let isLoading     = false;
   let lastLoadedAt  = 0;
   let debugMode     = false;
@@ -206,7 +276,20 @@
 
   async function loadAllDatasets() {
     const adminId = parseInt(currentAdminId, 10);
-    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek] = await Promise.all([
+
+    // Unassigned: try with both conditions, fall back to admin-only if team field unsupported
+    const unassignedPromise = fetchAllConvs([
+      { field: 'state', operator: '=', value: 'open' },
+      { field: 'admin_assignee_id', operator: '=', value: 0 },
+      { field: 'team_assignee_id', operator: '=', value: 0 },
+    ]).catch(() =>
+      fetchAllConvs([
+        { field: 'state', operator: '=', value: 'open' },
+        { field: 'admin_assignee_id', operator: '=', value: 0 },
+      ]).catch(() => [])
+    );
+
+    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned] = await Promise.all([
       fetchAllConvs([
         { field: 'state', operator: '=', value: 'open' },
         { field: 'admin_assignee_id', operator: '=', value: adminId },
@@ -224,16 +307,22 @@
         { field: 'admin_assignee_id', operator: '=', value: adminId },
         { field: 'statistics.last_close_at', operator: '>=', value: WEEK_START_S },
       ]),
+      unassignedPromise,
     ]);
+
     datasets[F_BACKLOG]        = backlog;
     datasets[F_ASSIGNED_WEEK]  = assignedThisWeek;
     datasets[F_ASSIGNED_TODAY] = assignedThisWeek.filter(c => (c.statistics?.last_assignment_at ?? 0) >= TODAY_START_S);
     datasets[F_CLOSED_WEEK]    = closedThisWeek;
     datasets[F_REPLIED_WEEK]   = repliedThisWeek;
     datasets[F_REPLIED_TODAY]  = repliedThisWeek.filter(c => (c.statistics?.last_admin_reply_at ?? 0) >= TODAY_START_S);
+    // Post-filter unassigned to ensure no team assignee either
+    datasets[F_UNASSIGNED]     = unassigned.filter(c =>
+      !c.team_assignee_id && (!c.assignee || c.assignee.type === 'nobody')
+    );
 
-    // Clear dismissed on refresh — fresh data means fresh state
     clearDismissed();
+    urgencyFilter = null;
 
     if (debugMode) {
       console.group('[SII Debug] Dataset load complete');
@@ -261,6 +350,11 @@
     } else {
       convs = datasets[activeFilter] ?? datasets[F_BACKLOG];
     }
+
+    if (urgencyFilter !== null) {
+      convs = convs.filter(c => String(getUrgency(c) ?? '') === urgencyFilter);
+    }
+
     return sortConvs(convs);
   }
 
@@ -297,6 +391,7 @@
       [F_REPLIED_TODAY]:  datasets[F_REPLIED_TODAY].length,
       [F_REPLIED_WEEK]:   datasets[F_REPLIED_WEEK].length,
       [F_CLOSED_WEEK]:    datasets[F_CLOSED_WEEK].length,
+      [F_UNASSIGNED]:     datasets[F_UNASSIGNED].length,
     };
   }
 
@@ -304,18 +399,34 @@
   // Formatting helpers
   // ---------------------------------------------------------------------------
 
+  function getSlaBreachTs(sla) {
+    // Try every known field name Intercom uses across API versions
+    return sla.next_breach_at || sla.breach_at || sla.sla_breach_at
+      || sla.next_breach || sla.due_at || null;
+  }
+
   function fmtSla(conv) {
-    const sla = conv.sla_applied, now = NOW_S();
+    // sla_applied can be an object or a 1-element array depending on API version
+    let sla = conv.sla_applied;
+    if (Array.isArray(sla)) sla = sla[0] ?? null;
+    const now = NOW_S();
     if (!sla) return { label: 'No SLA', cls: 'none' };
-    if (sla.sla_status === 'missed') {
-      const over = sla.next_breach_at ? fmtDur(now - sla.next_breach_at) : null;
+    const breachTs = getSlaBreachTs(sla);
+    const status   = sla.sla_status;
+
+    if (status === 'missed') {
+      const over = breachTs ? fmtDur(now - breachTs) : null;
       return { label: over ? `Breached ${over} ago` : 'Breached', cls: 'breached' };
     }
-    if (sla.sla_status === 'hit')       return { label: 'Met', cls: 'ok' };
-    if (sla.sla_status === 'cancelled') return { label: 'Cancelled', cls: 'none' };
-    if (sla.next_breach_at) {
-      const rem = sla.next_breach_at - now;
-      if (rem <= 0) return { label: 'Breached', cls: 'breached' };
+    if (status === 'cancelled') return { label: 'Cancelled', cls: 'none' };
+    if (status === 'hit') {
+      // Show how far past the deadline it was met, if we have the timestamp
+      return { label: breachTs ? `Met (${fmtDur(Math.abs(breachTs - now))})` : 'Met', cls: 'ok' };
+    }
+    // Active (or unknown status)
+    if (breachTs) {
+      const rem = breachTs - now;
+      if (rem <= 0) return { label: `Breached ${fmtDur(-rem)} ago`, cls: 'breached' };
       return { label: fmtDur(rem), cls: rem <= TWO_HOURS_S ? 'warning' : 'ok' };
     }
     return { label: 'Active', cls: 'ok' };
@@ -337,12 +448,35 @@
     return conv.source?.subject || conv.source?.body?.replace(/<[^>]+>/g, '').trim().slice(0, 80) || '(no subject)';
   }
 
+  function getUrgency(conv) {
+    // Case-insensitive search across custom_attributes and ticket_attributes
+    for (const bag of [conv.custom_attributes, conv.ticket_attributes]) {
+      if (!bag || typeof bag !== 'object') continue;
+      for (const key of Object.keys(bag)) {
+        if (key.toLowerCase() === 'urgency' && bag[key] != null && bag[key] !== '') return bag[key];
+      }
+    }
+    return null;
+  }
+
+  function isPriority(conv) {
+    return conv.priority === 'priority';
+  }
+
+  function urgencyBadgeCls(urgency) {
+    if (!urgency) return 'none';
+    const u = String(urgency).toLowerCase();
+    if (u === 'urgent' || u === 'high' || u === 'critical') return 'breached';
+    if (u === 'medium' || u === 'normal' || u === 'moderate') return 'warning';
+    return 'ok';
+  }
+
   function filterLabel(key) {
     const labels = {
       [F_BACKLOG]: 'Backlog', [F_SLA_BREACHED]: 'SLA Breached', [F_SLA_WARNING]: 'SLA Warning',
       [F_ASSIGNED_TODAY]: 'Assigned to Me Today', [F_ASSIGNED_WEEK]: 'Assigned to Me This Week',
       [F_REPLIED_TODAY]: 'Replied Today', [F_REPLIED_WEEK]: 'Replied This Week',
-      [F_CLOSED_WEEK]: 'Closed This Week',
+      [F_CLOSED_WEEK]: 'Closed This Week', [F_UNASSIGNED]: 'Unassigned',
     };
     return labels[key] || key;
   }
@@ -398,6 +532,7 @@
       width: 94vw; max-width: 1100px; max-height: 88vh;
       display: flex; flex-direction: column;
       box-shadow: 0 24px 64px rgba(0,0,0,0.22); overflow: hidden;
+      position: relative;
     }
 
     #sii-header {
@@ -417,9 +552,10 @@
       transition: all 0.1s;
     }
     .sii-icon-btn:hover { background: #f4f5f7; border-color: #bbb; }
+    .sii-icon-btn.active { background: #edf4fb; border-color: #1f73b7; color: #1f73b7; }
 
     #sii-stats {
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px;
       padding: 16px 22px; border-bottom: 1px solid #e8eaed; flex-shrink: 0;
     }
     .sii-stat-card {
@@ -439,6 +575,8 @@
     .sii-stat-card.green.active          { background: #d4edda; border-color: #2e7d32; }
     .sii-stat-card.purple                { background: #f3e8fd; }
     .sii-stat-card.purple.active         { background: #e8d5fa; border-color: #7b1fa2; }
+    .sii-stat-card.teal                  { background: #e0f2f1; }
+    .sii-stat-card.teal.active           { background: #b2dfdb; border-color: #00796b; }
     .sii-stat-label { font-size: 10px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
     .sii-stat-value { font-size: 26px; font-weight: 700; color: #1a1a1a; line-height: 1; }
     .sii-stat-card.warning .sii-stat-value { color: #b76e00; }
@@ -446,6 +584,7 @@
     .sii-stat-card.info    .sii-stat-value { color: #1565c0; }
     .sii-stat-card.green   .sii-stat-value { color: #2e7d32; }
     .sii-stat-card.purple  .sii-stat-value { color: #7b1fa2; }
+    .sii-stat-card.teal    .sii-stat-value { color: #00796b; }
     .sii-stat-sub { font-size: 10px; color: #bbb; margin-top: 3px; }
 
     .sii-stat-card.sii-loading { position: relative; overflow: hidden; pointer-events: none; }
@@ -475,6 +614,33 @@
       font-size: 11px; color: #1f73b7; font-weight: 600;
       background: #edf4fb; border-radius: 4px; padding: 3px 9px;
     }
+    #sii-urgency-filter { display: flex; align-items: center; gap: 6px; }
+
+    /* Column manager panel */
+    #sii-col-panel {
+      border-bottom: 1px solid #e8eaed; padding: 10px 22px;
+      background: #fafbfc; flex-shrink: 0;
+      display: flex; align-items: flex-start; gap: 14px;
+    }
+    .sii-col-panel-label {
+      font-size: 10px; font-weight: 700; color: #999; text-transform: uppercase;
+      letter-spacing: 0.4px; padding-top: 5px; white-space: nowrap; flex-shrink: 0;
+    }
+    .sii-col-list { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+    .sii-col-item {
+      display: flex; align-items: center; gap: 5px;
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 6px;
+      padding: 4px 9px; font-size: 12px; color: #444;
+      user-select: none; transition: border-color 0.1s, box-shadow 0.1s, opacity 0.1s;
+    }
+    .sii-col-item.draggable { cursor: grab; }
+    .sii-col-item.draggable:active { cursor: grabbing; }
+    .sii-col-item.inactive { opacity: 0.5; }
+    .sii-col-item.required { background: #f0f7ff; border-color: #c5dcf5; cursor: default; }
+    .sii-col-item.sii-drag-over { border-color: #1f73b7; box-shadow: 0 0 0 2px #c5dcf5; }
+    .sii-col-drag { font-size: 13px; color: #ccc; line-height: 1; width: 10px; }
+    .sii-col-item input[type=checkbox] { margin: 0; cursor: pointer; accent-color: #1f73b7; }
+    .sii-col-label { white-space: nowrap; }
 
     #sii-body { overflow-y: auto; flex: 1; min-height: 0; }
 
@@ -496,9 +662,9 @@
     .sii-badge.warning  { background: #fff8e6; color: #b76e00; }
     .sii-badge.breached { background: #fef0f0; color: #c0392b; }
     .sii-badge.none     { background: #f0f0f0; color: #aaa; }
+    .sii-badge.priority { background: #fff3cd; color: #856404; }
     .sii-ts { font-size: 11px; color: #aaa; white-space: nowrap; }
 
-    /* Dismiss button */
     .sii-dismiss-btn {
       background: none; border: 1px solid #e0e0e0; border-radius: 5px;
       padding: 3px 8px; font-size: 11px; color: #999; cursor: pointer;
@@ -506,7 +672,6 @@
     }
     .sii-dismiss-btn:hover { background: #f4f5f7; border-color: #bbb; color: #555; }
 
-    /* Restore button in dismissed section */
     .sii-restore-btn {
       background: none; border: 1px solid #d0dce8; border-radius: 5px;
       padding: 3px 8px; font-size: 11px; color: #1f73b7; cursor: pointer;
@@ -514,7 +679,6 @@
     }
     .sii-restore-btn:hover { background: #edf4fb; border-color: #1f73b7; }
 
-    /* Dismissed section */
     .sii-dismissed-header {
       padding: 10px 15px; font-size: 11px; font-weight: 700; color: #bbb;
       text-transform: uppercase; letter-spacing: 0.5px;
@@ -562,39 +726,328 @@
     if (!container) return;
     container.innerHTML = '';
     const first = currentAdminName ? currentAdminName.split(' ')[0] : null;
-    const cards = [
-      { key: F_BACKLOG, label: first ? `${first}'s Backlog` : 'Backlog', sub: 'open conversations', cls: '' },
-      { key: F_SLA_BREACHED, label: 'SLA Breached', sub: 'past deadline', cls: 'danger' },
-      { key: F_SLA_WARNING, label: 'SLA Warning', sub: '< 2h remaining', cls: 'warning' },
-      { key: F_ASSIGNED_TODAY, label: 'Assigned Today', sub: 'new assignments', cls: 'info' },
-      { key: F_ASSIGNED_WEEK, label: 'Assigned This Week', sub: 'since Sunday', cls: 'info' },
-      { key: F_REPLIED_TODAY, label: 'Replied Today', sub: 'my replies only', cls: 'green' },
-      { key: F_REPLIED_WEEK, label: 'Replied This Week', sub: 'since Sunday', cls: 'green' },
-      { key: F_CLOSED_WEEK, label: 'Closed This Week', sub: 'since Sunday', cls: 'purple' },
-    ];
-    for (const c of cards) {
-      const isActive = activeFilter === c.key;
+    for (const key of activeFilterCards) {
+      const def = ALL_FILTER_CARDS.find(c => c.key === key);
+      if (!def) continue;
+      const label = (def.key === F_BACKLOG && first) ? `${first}'s Backlog` : (def.label ?? 'Backlog');
+      const isActive = activeFilter === key;
       const card = el('div', {
-        className: `sii-stat-card ${c.cls}${isActive ? ' active' : ''}${loading ? ' sii-loading' : ''}`,
-        onClick: () => setActiveFilter(c.key),
+        className: `sii-stat-card ${def.cls}${isActive ? ' active' : ''}${loading ? ' sii-loading' : ''}`,
+        onClick: () => setActiveFilter(key),
       },
-        el('div', { className: 'sii-stat-label' }, c.label),
-        el('div', { className: 'sii-stat-value' }, loading ? '…' : String(stats[c.key] ?? 0)),
-        el('div', { className: 'sii-stat-sub' }, c.sub),
+        el('div', { className: 'sii-stat-label' }, label),
+        el('div', { className: 'sii-stat-value' }, loading ? '…' : String(stats[key] ?? 0)),
+        el('div', { className: 'sii-stat-sub' }, def.sub),
       );
-      card.dataset.statKey = c.key;
+      card.dataset.statKey = key;
       container.append(card);
     }
   }
 
   function setActiveFilter(key) {
     activeFilter = key;
+    urgencyFilter = null;
     document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.toggle('active', c.dataset.statKey === key));
     const label = document.getElementById('sii-active-label');
     if (label) label.textContent = filterLabel(key);
+    renderUrgencyFilter();
     const convs = getActiveConversations();
     renderList(convs);
     renderFooter(convs);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Urgency filter
+  // ---------------------------------------------------------------------------
+
+  function getUrgencyValues() {
+    const now = NOW_S();
+    let source;
+    if (activeFilter === F_SLA_WARNING) {
+      source = datasets[F_BACKLOG].filter(c => {
+        const sla = c.sla_applied;
+        if (!sla || sla.sla_status !== 'active') return false;
+        const rem = sla.next_breach_at - now;
+        return rem > 0 && rem <= TWO_HOURS_S;
+      });
+    } else if (activeFilter === F_SLA_BREACHED) {
+      source = datasets[F_BACKLOG].filter(c => c.sla_applied?.sla_status === 'missed');
+    } else {
+      source = datasets[activeFilter] ?? datasets[F_BACKLOG];
+    }
+    const vals = new Set();
+    for (const c of source) {
+      const u = getUrgency(c);
+      if (u != null && String(u).trim() !== '') vals.add(String(u));
+    }
+    return [...vals].sort();
+  }
+
+  function renderUrgencyFilter() {
+    const container = document.getElementById('sii-urgency-filter');
+    const sep = document.getElementById('sii-urgency-sep');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const vals = getUrgencyValues();
+    if (vals.length === 0) {
+      if (sep) sep.style.display = 'none';
+      return;
+    }
+    if (sep) sep.style.removeProperty('display');
+
+    const group = el('div', { className: 'sii-tab-group' });
+
+    group.append(el('button', {
+      className: `sii-tab${urgencyFilter === null ? ' active' : ''}`,
+      onClick() {
+        urgencyFilter = null;
+        renderUrgencyFilter();
+        const convs = getActiveConversations();
+        renderList(convs); renderFooter(convs);
+      },
+    }, 'All'));
+
+    for (const v of vals) {
+      group.append(el('button', {
+        className: `sii-tab${urgencyFilter === v ? ' active' : ''}`,
+        onClick() {
+          urgencyFilter = v;
+          renderUrgencyFilter();
+          const convs = getActiveConversations();
+          renderList(convs); renderFooter(convs);
+        },
+      }, v));
+    }
+
+    container.append(el('span', { className: 'sii-ctrl-label' }, 'Urgency:'), group);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Column manager
+  // ---------------------------------------------------------------------------
+
+  function toggleColMgr() {
+    colMgrVisible = !colMgrVisible;
+    document.getElementById('sii-col-btn')?.classList.toggle('active', colMgrVisible);
+    renderColMgr();
+  }
+
+  function renderColMgr() {
+    document.getElementById('sii-col-panel')?.remove();
+    if (!colMgrVisible) return;
+
+    let dragSrcId = null;
+    const list = el('div', { className: 'sii-col-list' });
+
+    function makeItem(colId, isActive) {
+      const col = ALL_COLUMNS.find(c => c.id === colId);
+      if (!col) return null;
+      const isRequired = col.required;
+      const isDraggable = isActive && !isRequired;
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = isActive;
+      if (isRequired) cb.disabled = true;
+      cb.addEventListener('change', () => {
+        if (cb.checked && !activeColumns.includes(colId)) {
+          activeColumns = [...activeColumns, colId];
+        } else if (!cb.checked) {
+          activeColumns = activeColumns.filter(id => id !== colId);
+        }
+        saveColumnPrefs(activeColumns);
+        renderColMgr();
+        renderList(getActiveConversations());
+      });
+
+      const classes = ['sii-col-item'];
+      if (isRequired) classes.push('required');
+      if (!isActive) classes.push('inactive');
+      if (isDraggable) classes.push('draggable');
+
+      const item = el('div', {
+        className: classes.join(' '),
+        'data-col-id': colId,
+      },
+        el('span', { className: 'sii-col-drag' }, isDraggable ? '⠿' : ''),
+        cb,
+        el('span', { className: 'sii-col-label' }, col.label || colId),
+      );
+
+      if (isDraggable) {
+        item.setAttribute('draggable', 'true');
+        item.addEventListener('dragstart', e => {
+          dragSrcId = colId;
+          e.dataTransfer.effectAllowed = 'move';
+          setTimeout(() => item.style.opacity = '0.4', 0);
+        });
+        item.addEventListener('dragend', () => {
+          dragSrcId = null;
+          item.style.opacity = '';
+          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+        });
+        item.addEventListener('dragover', e => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+          if (dragSrcId !== colId) item.classList.add('sii-drag-over');
+        });
+        item.addEventListener('dragleave', () => item.classList.remove('sii-drag-over'));
+        item.addEventListener('drop', e => {
+          e.preventDefault();
+          item.classList.remove('sii-drag-over');
+          if (!dragSrcId || dragSrcId === colId) return;
+          const newCols = [...activeColumns];
+          const from = newCols.indexOf(dragSrcId);
+          const to   = newCols.indexOf(colId);
+          if (from < 0 || to < 0) return;
+          newCols.splice(from, 1);
+          newCols.splice(to, 0, dragSrcId);
+          activeColumns = newCols;
+          saveColumnPrefs(activeColumns);
+          renderColMgr();
+          renderList(getActiveConversations());
+        });
+      }
+
+      return item;
+    }
+
+    // Active columns in current order
+    for (const colId of activeColumns) {
+      const item = makeItem(colId, true);
+      if (item) list.append(item);
+    }
+
+    // Inactive (unchecked) columns
+    for (const col of ALL_COLUMNS) {
+      if (activeColumns.includes(col.id) || col.required) continue;
+      const item = makeItem(col.id, false);
+      if (item) list.append(item);
+    }
+
+    const panel = el('div', { id: 'sii-col-panel' },
+      el('span', { className: 'sii-col-panel-label' }, 'Drag to reorder'),
+      list,
+    );
+
+    const controls = document.getElementById('sii-controls');
+    if (controls) controls.after(panel);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Filter manager
+  // ---------------------------------------------------------------------------
+
+  function toggleFilterMgr() {
+    filterMgrVisible = !filterMgrVisible;
+    document.getElementById('sii-filter-btn')?.classList.toggle('active', filterMgrVisible);
+    renderFilterMgr();
+  }
+
+  function renderFilterMgr() {
+    document.getElementById('sii-filter-panel')?.remove();
+    if (!filterMgrVisible) return;
+
+    let dragSrcKey = null;
+    const list = el('div', { className: 'sii-col-list' });
+
+    function makeItem(key, isActive) {
+      const def = ALL_FILTER_CARDS.find(c => c.key === key);
+      if (!def) return null;
+      const isRequired = def.required;
+      const isDraggable = isActive && !isRequired;
+      const first = currentAdminName ? currentAdminName.split(' ')[0] : null;
+      const label = (def.key === F_BACKLOG && first) ? `${first}'s Backlog` : (def.label ?? 'Backlog');
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = isActive;
+      if (isRequired) cb.disabled = true;
+      cb.addEventListener('change', () => {
+        if (cb.checked && !activeFilterCards.includes(key)) {
+          activeFilterCards = [...activeFilterCards, key];
+        } else if (!cb.checked) {
+          activeFilterCards = activeFilterCards.filter(k => k !== key);
+          if (activeFilter === key) {
+            activeFilter = F_BACKLOG;
+            document.getElementById('sii-active-label')?.textContent !== undefined &&
+              (document.getElementById('sii-active-label').textContent = filterLabel(F_BACKLOG));
+          }
+        }
+        saveFilterPrefs(activeFilterCards);
+        renderFilterMgr();
+        renderStats(getStats());
+      });
+
+      const classes = ['sii-col-item'];
+      if (isRequired) classes.push('required');
+      if (!isActive) classes.push('inactive');
+      if (isDraggable) classes.push('draggable');
+
+      const item = el('div', { className: classes.join(' '), 'data-filter-key': key },
+        el('span', { className: 'sii-col-drag' }, isDraggable ? '⠿' : ''),
+        cb,
+        el('span', { className: 'sii-col-label' }, label),
+      );
+
+      if (isDraggable) {
+        item.setAttribute('draggable', 'true');
+        item.addEventListener('dragstart', e => {
+          dragSrcKey = key;
+          e.dataTransfer.effectAllowed = 'move';
+          setTimeout(() => item.style.opacity = '0.4', 0);
+        });
+        item.addEventListener('dragend', () => {
+          dragSrcKey = null;
+          item.style.opacity = '';
+          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+        });
+        item.addEventListener('dragover', e => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+          if (dragSrcKey !== key) item.classList.add('sii-drag-over');
+        });
+        item.addEventListener('dragleave', () => item.classList.remove('sii-drag-over'));
+        item.addEventListener('drop', e => {
+          e.preventDefault();
+          item.classList.remove('sii-drag-over');
+          if (!dragSrcKey || dragSrcKey === key) return;
+          const newKeys = [...activeFilterCards];
+          const from = newKeys.indexOf(dragSrcKey);
+          const to   = newKeys.indexOf(key);
+          if (from < 0 || to < 0) return;
+          newKeys.splice(from, 1);
+          newKeys.splice(to, 0, dragSrcKey);
+          activeFilterCards = newKeys;
+          saveFilterPrefs(activeFilterCards);
+          renderFilterMgr();
+          renderStats(getStats());
+        });
+      }
+
+      return item;
+    }
+
+    for (const key of activeFilterCards) {
+      const item = makeItem(key, true);
+      if (item) list.append(item);
+    }
+    for (const def of ALL_FILTER_CARDS) {
+      if (activeFilterCards.includes(def.key) || def.required) continue;
+      const item = makeItem(def.key, false);
+      if (item) list.append(item);
+    }
+
+    const panel = el('div', { id: 'sii-filter-panel', className: 'sii-col-panel' },
+      el('span', { className: 'sii-col-panel-label' }, 'Drag to reorder'),
+      list,
+    );
+
+    const stats = document.getElementById('sii-stats');
+    if (stats) stats.before(panel);
   }
 
   // ---------------------------------------------------------------------------
@@ -606,44 +1059,82 @@
     const href = `https://app.intercom.com/a/inbox/_/inbox/conversation/${conv.id}`;
     const canDismiss = DISMISSABLE_FILTERS.has(activeFilter);
 
-    const actionCell = el('td', {});
-    if (canDismiss && !isDismissed) {
-      actionCell.append(el('button', {
-        className: 'sii-dismiss-btn',
-        onClick(e) {
-          e.stopPropagation();
-          dismissedIds.add(String(conv.id));
-          saveDismissed();
-          const convs = getActiveConversations();
-          renderList(convs);
-          renderFooter(convs);
-        },
-      }, '✓ Done'));
-    } else if (canDismiss && isDismissed) {
-      actionCell.append(el('button', {
-        className: 'sii-restore-btn',
-        onClick(e) {
-          e.stopPropagation();
-          dismissedIds.delete(String(conv.id));
-          saveDismissed();
-          const convs = getActiveConversations();
-          renderList(convs);
-          renderFooter(convs);
-        },
-      }, '↩ Restore'));
+    const cells = [];
+    for (const colId of activeColumns) {
+      switch (colId) {
+        case 'id':
+          cells.push(el('td', {},
+            el('a', { className: 'sii-conv-id', href, target: '_blank', onClick: e => e.stopPropagation() }, `#${conv.id}`)
+          ));
+          break;
+        case 'subject':
+          cells.push(el('td', {}, el('span', { className: 'sii-subject' }, getSubject(conv))));
+          break;
+        case 'sla':
+          cells.push(el('td', {}, el('span', { className: `sii-badge ${sla.cls}` }, sla.label)));
+          break;
+        case 'urgency': {
+          const u = getUrgency(conv);
+          cells.push(el('td', {}, el('span', { className: `sii-badge ${urgencyBadgeCls(u)}` }, u || '—')));
+          break;
+        }
+        case 'priority':
+          cells.push(el('td', {},
+            isPriority(conv)
+              ? el('span', { className: 'sii-badge priority' }, '★ Priority')
+              : el('span', { className: 'sii-badge none' }, '—')
+          ));
+          break;
+        case 'created':
+          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.created_at))));
+          break;
+        case 'updated':
+          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.updated_at))));
+          break;
+      }
+    }
+
+    if (canDismiss) {
+      const actionCell = el('td', {});
+      if (!isDismissed) {
+        actionCell.append(el('button', {
+          className: 'sii-dismiss-btn',
+          onClick(e) {
+            e.stopPropagation();
+            dismissedIds.add(String(conv.id));
+            saveDismissed();
+            const convs = getActiveConversations();
+            renderList(convs); renderFooter(convs);
+          },
+        }, '✓ Done'));
+      } else {
+        actionCell.append(el('button', {
+          className: 'sii-restore-btn',
+          onClick(e) {
+            e.stopPropagation();
+            dismissedIds.delete(String(conv.id));
+            saveDismissed();
+            const convs = getActiveConversations();
+            renderList(convs); renderFooter(convs);
+          },
+        }, '↩ Restore'));
+      }
+      cells.push(actionCell);
     }
 
     return el('tr', {
       className: `sii-row${isDismissed ? ' dismissed' : ''}`,
       onClick() { window.open(href, '_blank'); },
-    },
-      el('td', {}, el('a', { className: 'sii-conv-id', href, target: '_blank', onClick: e => e.stopPropagation() }, `#${conv.id}`)),
-      el('td', {}, el('span', { className: 'sii-subject' }, getSubject(conv))),
-      el('td', {}, el('span', { className: `sii-badge ${sla.cls}` }, sla.label)),
-      el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.created_at))),
-      el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.updated_at))),
-      actionCell,
-    );
+    }, ...cells);
+  }
+
+  function buildTableHeader(canDismiss) {
+    const labels = {
+      id: '#', subject: 'Subject / Preview', sla: 'SLA',
+      urgency: 'Urgency', priority: 'Priority', created: 'Created', updated: 'Updated',
+    };
+    const ths = activeColumns.map(id => `<th>${labels[id] ?? id}</th>`).join('');
+    return `<tr>${ths}${canDismiss ? '<th></th>' : ''}</tr>`;
   }
 
   function renderList(convs) {
@@ -661,7 +1152,7 @@
 
     const canDismiss = DISMISSABLE_FILTERS.has(activeFilter);
     const active    = canDismiss ? convs.filter(c => !dismissedIds.has(String(c.id))) : convs;
-    const dismissed = canDismiss ? convs.filter(c => dismissedIds.has(String(c.id)))  : [];
+    const dismissed = canDismiss ? convs.filter(c =>  dismissedIds.has(String(c.id))) : [];
 
     if (!active.length && !dismissed.length) {
       body.append(el('div', { id: 'sii-empty' }, `No conversations in ${filterLabel(activeFilter)}.`));
@@ -670,29 +1161,21 @@
 
     const table = el('table', { className: 'sii-table' });
     const thead = el('thead');
-    thead.innerHTML = canDismiss
-      ? '<tr><th>#</th><th>Subject / Preview</th><th>SLA</th><th>Created</th><th>Updated</th><th></th></tr>'
-      : '<tr><th>#</th><th>Subject / Preview</th><th>SLA</th><th>Created</th><th>Updated</th></tr>';
+    thead.innerHTML = buildTableHeader(canDismiss);
     table.append(thead);
 
     const tbody = el('tbody');
-    for (const conv of active) {
-      tbody.append(buildRow(conv, false));
-    }
+    for (const conv of active) tbody.append(buildRow(conv, false));
 
-    // Dismissed section
     if (dismissed.length > 0) {
       const dividerRow = el('tr');
       const dividerCell = el('td', {
         className: 'sii-dismissed-header',
-        colspan: canDismiss ? '6' : '5',
+        colspan: String(activeColumns.length + (canDismiss ? 1 : 0)),
       }, `Dismissed (${dismissed.length})`);
       dividerRow.append(dividerCell);
       tbody.append(dividerRow);
-
-      for (const conv of dismissed) {
-        tbody.append(buildRow(conv, true));
-      }
+      for (const conv of dismissed) tbody.append(buildRow(conv, true));
     }
 
     table.append(tbody);
@@ -706,7 +1189,8 @@
     const dismissedCount = canDismiss ? convs.filter(c => dismissedIds.has(String(c.id))).length : 0;
     const activeCount = convs.length - dismissedCount;
     const dismissedText = dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : '';
-    f.textContent = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText} · Refreshed ${new Date().toLocaleTimeString()}`;
+    const urgencyText = urgencyFilter ? ` · Urgency: ${urgencyFilter}` : '';
+    f.textContent = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
   }
 
   // ---------------------------------------------------------------------------
@@ -718,6 +1202,12 @@
   function showSettings() {
     if (settingsVisible) return;
     settingsVisible = true;
+    colMgrVisible = false;
+    filterMgrVisible = false;
+    document.getElementById('sii-col-panel')?.remove();
+    document.getElementById('sii-filter-panel')?.remove();
+    document.getElementById('sii-col-btn')?.classList.remove('active');
+    document.getElementById('sii-filter-btn')?.classList.remove('active');
     const modal = document.getElementById('sii-modal');
     if (!modal) return;
     ['sii-stats', 'sii-controls', 'sii-body', 'sii-footer'].forEach(id => {
@@ -765,10 +1255,6 @@
           hideSettings();
         }}, 'Clear saved data'),
       ),
-      el('div', { style: { marginTop: '20px', paddingTop: '16px', borderTop: '1px solid #e8eaed' } },
-        el('p', { style: { fontSize: '11px', color: '#bbb', margin: '0' } },
-          'Maintained by joao@hipp.health & guilherme@hipp.health'),
-      ),
     );
     modal.insertBefore(panel, document.getElementById('sii-footer') || null);
   }
@@ -799,6 +1285,8 @@
         ),
         el('div', { className: 'sii-header-right' },
           el('button', { className: 'sii-icon-btn', onClick: handleRefresh }, '↻ Refresh'),
+          el('button', { id: 'sii-filter-btn', className: 'sii-icon-btn', onClick: toggleFilterMgr }, '⊟ Filters'),
+          el('button', { id: 'sii-col-btn', className: 'sii-icon-btn', onClick: toggleColMgr }, '⊞ Columns'),
           el('button', { className: 'sii-icon-btn', onClick: showSettings }, '⚙ Settings'),
           el('button', { className: 'sii-icon-btn', onClick: closeModal }, '✕'),
         ),
@@ -809,6 +1297,8 @@
         buildSortButtons(),
         el('div', { className: 'sii-sep' }),
         el('span', { id: 'sii-active-label' }, filterLabel(activeFilter)),
+        el('div', { className: 'sii-sep', id: 'sii-urgency-sep', style: { display: 'none' } }),
+        el('div', { id: 'sii-urgency-filter' }),
       ),
       el('div', { id: 'sii-body' }),
       el('div', { id: 'sii-footer' }, ''),
@@ -866,8 +1356,10 @@
     const isFresh = hasData && (NOW_S() - lastLoadedAt < getStaleSecs());
     if (isFresh) {
       renderStats(getStats());
-      renderList(getActiveConversations());
-      renderFooter(getActiveConversations());
+      const convs = getActiveConversations();
+      renderList(convs);
+      renderFooter(convs);
+      renderUrgencyFilter();
     } else {
       renderStats(hasData ? getStats() : {}, true);
       handleRefresh();
@@ -877,6 +1369,7 @@
   function closeModal() {
     document.getElementById('sii-overlay')?.remove();
     settingsVisible = false;
+    colMgrVisible = false;
   }
 
   // ---------------------------------------------------------------------------
@@ -892,7 +1385,7 @@
     const body = document.getElementById('sii-body');
     if (body) {
       body.innerHTML = '';
-      body.append(el('div', { id: 'sii-loading' }, el('div', { className: 'sii-spinner' }), 'Loading all datasets…', el('span', { className: 'sii-loading-sub' }, 'Fetching backlog, assignments, replies, and closed in parallel…')));
+      body.append(el('div', { id: 'sii-loading' }, el('div', { className: 'sii-spinner' }), 'Loading all datasets…', el('span', { className: 'sii-loading-sub' }, 'Fetching backlog, assignments, replies, closed, and unassigned in parallel…')));
     }
 
     try {
@@ -903,7 +1396,7 @@
       lastLoadedAt = NOW_S();
       isLoading = false;
       const stats = getStats(), convs = getActiveConversations();
-      renderStats(stats); renderList(convs); renderFooter(convs);
+      renderStats(stats); renderList(convs); renderFooter(convs); renderUrgencyFilter();
     } catch (err) {
       const body = document.getElementById('sii-body');
       if (body) { body.innerHTML = ''; body.append(el('div', { id: 'sii-empty' }, `⚠️ ${err.message}. Try refreshing or check your token in ⚙ Settings.`)); }
@@ -936,7 +1429,7 @@
         lastLoadedAt = NOW_S();
         if (document.getElementById('sii-overlay') && !settingsVisible) {
           const stats = getStats(), convs = getActiveConversations();
-          renderStats(stats); renderList(convs); renderFooter(convs);
+          renderStats(stats); renderList(convs); renderFooter(convs); renderUrgencyFilter();
         }
       } catch (_) {}
     }, 60 * 1000);
@@ -963,6 +1456,7 @@
           const detail = await apiRequest({ path: `/conversations/${id}` });
           const parts = detail.conversation_parts?.conversation_parts ?? [];
           console.group(`[SII Inspect] Conversation #${id} — ${parts.length} parts`);
+          console.log('SLA raw:', detail.sla_applied);
           console.log('Statistics:', detail.statistics);
           console.log(`last_admin_reply_at: ${detail.statistics?.last_admin_reply_at ? new Date(detail.statistics.last_admin_reply_at * 1000).toISOString() : 'null'}`);
           parts.forEach((p, idx) => {
@@ -974,7 +1468,15 @@
         } catch (err) { console.error(`[SII Inspect] Failed to fetch #${id}:`, err); }
       }
     };
+    unsafeWindow.siiSla = (n = 5) => {
+      const convs = datasets[F_BACKLOG].slice(0, n);
+      if (!convs.length) { console.log('[SII] No backlog data loaded yet.'); return; }
+      console.group(`[SII SLA] Raw sla_applied for first ${convs.length} backlog conversations`);
+      convs.forEach(c => {
+        console.log(`#${c.id}`, JSON.parse(JSON.stringify(c.sla_applied ?? null)));
+      });
+      console.groupEnd();
+    };
   } catch (_) {}
 
-})();
 })();
