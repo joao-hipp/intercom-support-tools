@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.3.0-blue)
 
 ## Install
 
@@ -16,12 +16,27 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 
 ## Features
 
+### Stat Cards
 - **Backlog** — your open conversations assigned to you
 - **SLA Breached** — conversations past their SLA deadline
 - **SLA Warning** — conversations within 2 hours of breaching SLA
 - **Assigned Today / This Week** — new assignments since today or Sunday
 - **Replied Today / This Week** — conversations you've replied to
 - **Closed This Week** — resolved conversations since Sunday
+
+### Table
+- **Configurable columns** — show, hide, and reorder columns to your preference; layout is saved between sessions
+- **Columns available:** ID, Subject/Preview, SLA, Status, Assignee, Team, Urgency, Priority, Created, Last Updated
+- **Urgency column** — shows the ticket urgency badge (e.g. High, Medium, Low)
+- **Priority column** — flags conversations marked as priority in Intercom
+- **Team column** — displays the assigned team name
+
+### Filters
+- **Urgency filter** — filter the table to a specific urgency level
+- **Unassigned filter** — show only conversations with no assignee
+- **Configurable filter bar** — show, hide, and reorder filter chips; layout is saved between sessions
+
+### Other
 - **Dismiss** — mark a conversation as handled to declutter your view without waiting for a data refresh
 - **Sorting** — sort by SLA urgency, created date, or last updated
 - **Configurable refresh** — set how often the dashboard fetches fresh data (default: 30 minutes)
@@ -48,6 +63,21 @@ Click the **⚙ Settings** button inside the dashboard to:
 ## How It Works
 
 The script runs inside Intercom's web app via Tampermonkey. It captures your existing session token from Intercom's own API calls (no separate login needed) and queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
+
+## Changelog
+
+### v2.3.0
+- Added **Team column** with team name resolution
+- Added **Urgency column** with colour-coded badges (fixed case-insensitive field lookup)
+- Added **Priority column**
+- Added **Unassigned filter** (conversations with no assignee)
+- **Configurable columns** — show/hide and drag-to-reorder, persisted in localStorage
+- **Configurable filter bar** — show/hide filter chips and drag-to-reorder, persisted in localStorage
+- Subject/Preview column is now optional (can be hidden)
+- SLA column now shows the policy name alongside time remaining or breach status
+
+### v2.0.0
+- Initial public release
 
 ## Maintainers
 
