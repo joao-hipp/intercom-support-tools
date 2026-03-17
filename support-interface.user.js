@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.2.0
+// @version      2.3.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -61,7 +61,7 @@
     { key: F_BACKLOG,        label: null,                  sub: 'open conversations', cls: '',        required: true  },
     { key: F_SLA_BREACHED,   label: 'SLA Breached',        sub: 'past deadline',      cls: 'danger',  required: false },
     { key: F_SLA_WARNING,    label: 'SLA Warning',         sub: '< 2h remaining',     cls: 'warning', required: false },
-    { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no owner or team',   cls: 'teal',    required: false },
+    { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no assignee',        cls: 'teal',    required: false },
     { key: F_ASSIGNED_TODAY, label: 'Assigned Today',      sub: 'new assignments',    cls: 'info',    required: false },
     { key: F_ASSIGNED_WEEK,  label: 'Assigned This Week',  sub: 'since Sunday',       cls: 'info',    required: false },
     { key: F_REPLIED_TODAY,  label: 'Replied Today',       sub: 'my replies only',    cls: 'green',   required: false },
@@ -79,6 +79,7 @@
     { id: 'sla',      label: 'SLA' },
     { id: 'urgency',  label: 'Urgency' },
     { id: 'priority', label: 'Priority' },
+    { id: 'team',     label: 'Team' },
     { id: 'created',  label: 'Created' },
     { id: 'updated',  label: 'Updated' },
   ];
@@ -248,6 +249,19 @@
     });
   }
 
+  let teamsMap = null; // id → name, loaded once
+
+  async function ensureTeamsMap() {
+    if (teamsMap) return;
+    try {
+      const resp = await apiRequest({ path: '/teams' });
+      const list = resp.teams ?? resp.data ?? [];
+      teamsMap = Object.fromEntries(list.map(t => [String(t.id), t.name]));
+    } catch (_) {
+      teamsMap = {};
+    }
+  }
+
   async function ensureAdminInfo() {
     if (currentAdminId) return;
     const me = await apiRequest({ path: '/me' });
@@ -275,19 +289,14 @@
   // ---------------------------------------------------------------------------
 
   async function loadAllDatasets() {
+    await ensureTeamsMap();
     const adminId = parseInt(currentAdminId, 10);
 
-    // Unassigned: try with both conditions, fall back to admin-only if team field unsupported
+    // Unassigned: conversations where the individual assignee is empty
     const unassignedPromise = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
       { field: 'admin_assignee_id', operator: '=', value: 0 },
-      { field: 'team_assignee_id', operator: '=', value: 0 },
-    ]).catch(() =>
-      fetchAllConvs([
-        { field: 'state', operator: '=', value: 'open' },
-        { field: 'admin_assignee_id', operator: '=', value: 0 },
-      ]).catch(() => [])
-    );
+    ]).catch(() => []);
 
     const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned] = await Promise.all([
       fetchAllConvs([
@@ -316,10 +325,7 @@
     datasets[F_CLOSED_WEEK]    = closedThisWeek;
     datasets[F_REPLIED_WEEK]   = repliedThisWeek;
     datasets[F_REPLIED_TODAY]  = repliedThisWeek.filter(c => (c.statistics?.last_admin_reply_at ?? 0) >= TODAY_START_S);
-    // Post-filter unassigned to ensure no team assignee either
-    datasets[F_UNASSIGNED]     = unassigned.filter(c =>
-      !c.team_assignee_id && (!c.assignee || c.assignee.type === 'nobody')
-    );
+    datasets[F_UNASSIGNED]     = unassigned.filter(c => !c.assignee || c.assignee.type === 'nobody');
 
     clearDismissed();
     urgencyFilter = null;
@@ -1085,6 +1091,13 @@
               : el('span', { className: 'sii-badge none' }, '—')
           ));
           break;
+        case 'team': {
+          const team = conv.team_assignee_id
+            ? (teamsMap?.[String(conv.team_assignee_id)] ?? `Team ${conv.team_assignee_id}`)
+            : '—';
+          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, team)));
+          break;
+        }
         case 'created':
           cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.created_at))));
           break;
@@ -1131,7 +1144,7 @@
   function buildTableHeader(canDismiss) {
     const labels = {
       id: '#', subject: 'Subject / Preview', sla: 'SLA',
-      urgency: 'Urgency', priority: 'Priority', created: 'Created', updated: 'Updated',
+      urgency: 'Urgency', priority: 'Priority', team: 'Team', created: 'Created', updated: 'Updated',
     };
     const ths = activeColumns.map(id => `<th>${labels[id] ?? id}</th>`).join('');
     return `<tr>${ths}${canDismiss ? '<th></th>' : ''}</tr>`;
