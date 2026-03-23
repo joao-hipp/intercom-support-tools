@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.5.0-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.6.0-blue)
 
 ## Install
 
@@ -68,6 +68,11 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.6.0
+- **Searchable company filter** — type-ahead dropdown to filter conversations by company name; keyboard navigation (arrows + Enter), clear button, and auto-populated from current data
+- **Fixed company resolution** — switched to `GET /contacts/{id}` for reliable contact-to-company mapping
+- **Fixed team names on cached loads** — `teamsMap` is now persisted in the localStorage cache so team names display immediately
 
 ### v2.5.0
 - **Company column** — resolves and displays company names from conversation contacts via the Intercom Companies API

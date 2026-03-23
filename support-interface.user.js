@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.5.0
+// @version      2.6.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -137,6 +137,7 @@
   let activeFilter  = F_BACKLOG;
   let sortMode      = 'sla_asc';
   let urgencyFilter = null;
+  let companyFilter = null; // null = all, string = company name
   let activeColumns = loadColumnPrefs();
   let colMgrVisible = false;
   let activeFilterCards = loadFilterPrefs();
@@ -167,7 +168,12 @@
 
   function saveCache() {
     try {
-      const payload = { ts: NOW_S(), datasets: {}, convCompanyMap };
+      const payload = {
+        ts: NOW_S(),
+        datasets: {},
+        convCompanyMap,
+        teamsMap: teamsMap || {},
+      };
       for (const [k, v] of Object.entries(datasets)) payload.datasets[k] = v;
       localStorage.setItem(STORAGE_CACHE, JSON.stringify(payload));
     } catch (_) {}
@@ -177,12 +183,14 @@
     try {
       const raw = localStorage.getItem(STORAGE_CACHE);
       if (!raw) return false;
-      const { ts, datasets: cached, convCompanyMap: cachedCompanies } = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      const { ts, datasets: cached } = parsed;
       if (!ts || !cached) return false;
       for (const [k, v] of Object.entries(cached)) {
         if (datasets.hasOwnProperty(k)) datasets[k] = v;
       }
-      if (cachedCompanies) convCompanyMap = cachedCompanies;
+      if (parsed.convCompanyMap) convCompanyMap = parsed.convCompanyMap;
+      if (parsed.teamsMap) teamsMap = parsed.teamsMap;
       lastLoadedAt = ts;
       return true;
     } catch (_) { return false; }
@@ -239,7 +247,9 @@
       const resp = await apiRequest({ path: '/teams' });
       const list = resp.teams ?? resp.data ?? [];
       teamsMap = Object.fromEntries(list.map(t => [String(t.id), t.name]));
-    } catch (_) {
+      if (debugMode) console.log(`[SII] Teams loaded: ${list.length}`, teamsMap);
+    } catch (err) {
+      if (debugMode) console.warn('[SII] Failed to load teams:', err.message);
       teamsMap = {};
     }
   }
@@ -270,34 +280,37 @@
       const contacts = conv.contacts?.contacts ?? conv.contacts?.data ?? [];
       for (const c of contacts) if (c.id) contactIds.add(c.id);
     }
-    if (!contactIds.size) return;
-
-    // Fetch contacts in batches to get their company associations
-    const contactCompany = {}; // contact_id → company_name
-    const ids = [...contactIds];
-    const BATCH = 50;
-    for (let i = 0; i < ids.length; i += BATCH) {
-      const batch = ids.slice(i, i + BATCH);
-      try {
-        const resp = await apiRequest({
-          method: 'POST',
-          path: '/contacts/search',
-          body: {
-            query: { field: 'id', operator: 'IN', value: batch },
-            pagination: { per_page: 150 },
-          },
-        });
-        for (const contact of (resp.data ?? [])) {
-          const companies = contact.companies?.data ?? contact.companies?.companies ?? [];
-          if (companies.length) {
-            const compId = String(companies[0].id);
-            contactCompany[contact.id] = companiesMap?.[compId] ?? companies[0].name ?? compId;
-          }
-        }
-      } catch (_) {}
+    if (!contactIds.size) {
+      if (debugMode) console.log('[SII] Company resolution: no contact IDs found in conversations');
+      return;
     }
 
-    // Map conv → company via first contact
+    // Fetch each contact's full profile to read their company associations.
+    // GET /contacts/{id} returns { companies: { data: [{ id, name, ... }] } }
+    const contactCompany = {}; // contact_id → company_name
+    const ids = [...contactIds];
+    const CONCURRENCY = 5;
+    for (let i = 0; i < ids.length; i += CONCURRENCY) {
+      const batch = ids.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(id => apiRequest({ path: `/contacts/${id}` }))
+      );
+      results.forEach((result, idx) => {
+        if (result.status !== 'fulfilled') return;
+        const contact = result.value;
+        // Try every known shape the companies field can take
+        const companies = contact.companies?.data
+          ?? contact.companies?.companies
+          ?? (Array.isArray(contact.companies) ? contact.companies : []);
+        if (companies.length) {
+          const comp = companies[0];
+          const name = comp.name || companiesMap?.[String(comp.id)] || null;
+          if (name) contactCompany[batch[idx]] = name;
+        }
+      });
+    }
+
+    // Map conv → company via first contact that has a company
     convCompanyMap = {};
     for (const conv of allConvs) {
       const contacts = conv.contacts?.contacts ?? conv.contacts?.data ?? [];
@@ -306,6 +319,17 @@
           convCompanyMap[String(conv.id)] = contactCompany[c.id];
           break;
         }
+      }
+    }
+
+    if (debugMode) {
+      console.log(`[SII] Company resolution: ${contactIds.size} contacts → ${Object.keys(contactCompany).length} with companies → ${Object.keys(convCompanyMap).length} convs mapped`);
+      if (!Object.keys(contactCompany).length && ids.length) {
+        // Dump a sample contact response to help debug
+        try {
+          const sample = await apiRequest({ path: `/contacts/${ids[0]}` });
+          console.log('[SII] Sample contact response:', JSON.stringify(sample, null, 2));
+        } catch (_) {}
       }
     }
   }
@@ -463,6 +487,7 @@
 
     clearDismissed();
     urgencyFilter = null;
+    companyFilter = null;
     saveCache();
 
     if (debugMode) {
@@ -494,6 +519,10 @@
 
     if (urgencyFilter !== null) {
       convs = convs.filter(c => String(getUrgency(c) ?? '') === urgencyFilter);
+    }
+
+    if (companyFilter !== null) {
+      convs = convs.filter(c => (convCompanyMap[String(c.id)] || '') === companyFilter);
     }
 
     return sortConvs(convs);
@@ -775,6 +804,39 @@
     }
     #sii-urgency-filter { display: flex; align-items: center; gap: 6px; }
 
+    /* Company filter dropdown */
+    #sii-company-filter { display: flex; align-items: center; gap: 6px; }
+    .sii-combo { position: relative; min-width: 180px; }
+    .sii-combo-input {
+      width: 100%; box-sizing: border-box;
+      border: 1px solid #e0e0e0; border-radius: 5px; padding: 4px 28px 4px 10px;
+      font-size: 12px; font-family: inherit; color: #333; background: #fff;
+      outline: none; transition: border-color 0.15s;
+    }
+    .sii-combo-input:focus { border-color: #1f73b7; }
+    .sii-combo-input::placeholder { color: #aaa; }
+    .sii-combo-clear {
+      position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer; color: #999; font-size: 14px;
+      padding: 0 2px; line-height: 1; display: none;
+    }
+    .sii-combo-clear:hover { color: #333; }
+    .sii-combo.has-value .sii-combo-clear { display: block; }
+    .sii-combo-list {
+      position: absolute; top: 100%; left: 0; right: 0; z-index: 10;
+      max-height: 200px; overflow-y: auto; background: #fff;
+      border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 5px 5px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: none;
+    }
+    .sii-combo.open .sii-combo-list { display: block; }
+    .sii-combo-opt {
+      padding: 5px 10px; font-size: 12px; cursor: pointer; color: #333;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sii-combo-opt:hover, .sii-combo-opt.highlighted { background: #edf4fb; }
+    .sii-combo-opt.active { background: #1f73b7; color: #fff; }
+    .sii-combo-empty { padding: 8px 10px; font-size: 11px; color: #999; font-style: italic; }
+
     /* Column manager panel */
     #sii-col-panel {
       border-bottom: 1px solid #e8eaed; padding: 10px 22px;
@@ -906,9 +968,11 @@
   function setActiveFilter(key) {
     activeFilter = key;
     urgencyFilter = null;
+    companyFilter = null;
     document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.toggle('active', c.dataset.statKey === key));
     const label = document.getElementById('sii-active-label');
     if (label) label.textContent = filterLabel(key);
+    renderCompanyFilter();
     renderUrgencyFilter();
     const convs = getActiveConversations();
     renderList(convs);
@@ -980,6 +1044,144 @@
     }
 
     container.append(el('span', { className: 'sii-ctrl-label' }, 'Urgency:'), group);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Company filter (searchable dropdown / combobox)
+  // ---------------------------------------------------------------------------
+
+  function getCompanyValues() {
+    // Collect unique company names from current conversations
+    const convs = getActiveConversations();
+    const names = new Set();
+    for (const c of convs) {
+      const name = convCompanyMap[String(c.id)];
+      if (name) names.add(name);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }
+
+  function renderCompanyFilter() {
+    const container = document.getElementById('sii-company-filter');
+    const sep = document.getElementById('sii-company-sep');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const allNames = getCompanyValues();
+    if (allNames.length === 0) {
+      if (sep) sep.style.display = 'none';
+      return;
+    }
+    if (sep) sep.style.removeProperty('display');
+
+    let highlightIdx = -1;
+
+    const wrapper = el('div', { className: `sii-combo${companyFilter ? ' has-value' : ''}` });
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'sii-combo-input';
+    input.placeholder = 'All companies';
+    input.value = companyFilter || '';
+
+    const clearBtn = el('button', { className: 'sii-combo-clear', onClick(e) {
+      e.stopPropagation();
+      companyFilter = null;
+      input.value = '';
+      wrapper.classList.remove('has-value', 'open');
+      const convs = getActiveConversations();
+      renderList(convs); renderFooter(convs);
+    }}, '×');
+
+    const listBox = el('div', { className: 'sii-combo-list' });
+
+    function buildOptions(filter) {
+      listBox.innerHTML = '';
+      highlightIdx = -1;
+      const q = (filter || '').toLowerCase();
+      const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
+      if (!filtered.length) {
+        listBox.append(el('div', { className: 'sii-combo-empty' }, 'No matches'));
+        return;
+      }
+      for (let i = 0; i < filtered.length; i++) {
+        const name = filtered[i];
+        const isActive = name === companyFilter;
+        const opt = el('div', {
+          className: `sii-combo-opt${isActive ? ' active' : ''}`,
+          'data-idx': i,
+          onMousedown(e) {
+            e.preventDefault(); // prevent blur
+            selectCompany(name);
+          },
+          onMouseenter() {
+            listBox.querySelectorAll('.highlighted').forEach(o => o.classList.remove('highlighted'));
+            opt.classList.add('highlighted');
+            highlightIdx = i;
+          },
+        }, name);
+        listBox.append(opt);
+      }
+    }
+
+    function selectCompany(name) {
+      companyFilter = name;
+      input.value = name;
+      wrapper.classList.add('has-value');
+      wrapper.classList.remove('open');
+      const convs = getActiveConversations();
+      renderList(convs); renderFooter(convs);
+    }
+
+    input.addEventListener('focus', () => {
+      buildOptions(input.value);
+      wrapper.classList.add('open');
+    });
+
+    input.addEventListener('blur', () => {
+      // Small delay to let mousedown on option fire first
+      setTimeout(() => wrapper.classList.remove('open'), 150);
+    });
+
+    input.addEventListener('input', () => {
+      buildOptions(input.value);
+      if (!wrapper.classList.contains('open')) wrapper.classList.add('open');
+      // If user clears the input, reset the filter
+      if (!input.value.trim()) {
+        companyFilter = null;
+        wrapper.classList.remove('has-value');
+        const convs = getActiveConversations();
+        renderList(convs); renderFooter(convs);
+      }
+    });
+
+    input.addEventListener('keydown', (e) => {
+      const opts = listBox.querySelectorAll('.sii-combo-opt');
+      if (!opts.length) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        highlightIdx = Math.min(highlightIdx + 1, opts.length - 1);
+        opts.forEach(o => o.classList.remove('highlighted'));
+        opts[highlightIdx]?.classList.add('highlighted');
+        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        highlightIdx = Math.max(highlightIdx - 1, 0);
+        opts.forEach(o => o.classList.remove('highlighted'));
+        opts[highlightIdx]?.classList.add('highlighted');
+        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (highlightIdx >= 0 && opts[highlightIdx]) {
+          selectCompany(opts[highlightIdx].textContent);
+        }
+      } else if (e.key === 'Escape') {
+        wrapper.classList.remove('open');
+        input.blur();
+      }
+    });
+
+    wrapper.append(input, clearBtn, listBox);
+    container.append(el('span', { className: 'sii-ctrl-label' }, 'Company:'), wrapper);
   }
 
   // ---------------------------------------------------------------------------
@@ -1361,7 +1563,8 @@
     const activeCount = convs.length - dismissedCount;
     const dismissedText = dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : '';
     const urgencyText = urgencyFilter ? ` · Urgency: ${urgencyFilter}` : '';
-    f.textContent = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
+    const companyText = companyFilter ? ` · Company: ${companyFilter}` : '';
+    f.textContent = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${companyText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
   }
 
   // ---------------------------------------------------------------------------
@@ -1470,6 +1673,8 @@
         buildSortButtons(),
         el('div', { className: 'sii-sep' }),
         el('span', { id: 'sii-active-label' }, filterLabel(activeFilter)),
+        el('div', { className: 'sii-sep', id: 'sii-company-sep', style: { display: 'none' } }),
+        el('div', { id: 'sii-company-filter' }),
         el('div', { className: 'sii-sep', id: 'sii-urgency-sep', style: { display: 'none' } }),
         el('div', { id: 'sii-urgency-filter' }),
       ),
@@ -1538,6 +1743,7 @@
       const convs = getActiveConversations();
       renderList(convs);
       renderFooter(convs);
+      renderCompanyFilter();
       renderUrgencyFilter();
       // Background-refresh if stale
       if (!isFresh) handleRefresh();
@@ -1604,7 +1810,7 @@
       isLoading = false;
       updateButtonStatus('st-fresh');
       const stats = getStats(), convs = getActiveConversations();
-      renderStats(stats); renderList(convs); renderFooter(convs); renderUrgencyFilter();
+      renderStats(stats); renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
     } catch (err) {
       isLoading = false;
       updateButtonStatus('st-error');
@@ -1648,7 +1854,7 @@
         updateButtonStatus('st-fresh');
         if (document.getElementById('sii-overlay') && !settingsVisible) {
           const stats = getStats(), convs = getActiveConversations();
-          renderStats(stats); renderList(convs); renderFooter(convs); renderUrgencyFilter();
+          renderStats(stats); renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
         }
       } catch (_) {
         isLoading = false;
