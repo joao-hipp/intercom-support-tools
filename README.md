@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.3.0-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.4.0-blue)
 
 ## Install
 
@@ -11,8 +11,8 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 
    ### [Click here to install](https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js)
 
-3. Click **Install**. A ☰ button will appear on the right side of your Intercom page.
-4. Click it to open the dashboard.
+3. Click **Install**. A ☰ button with a coloured status dot will appear on the right side of your Intercom page.
+4. Click it — if no API token is configured yet, Settings will open automatically so you can paste your token.
 
 ## Features
 
@@ -40,7 +40,9 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 - **Dismiss** — mark a conversation as handled to declutter your view without waiting for a data refresh
 - **Sorting** — sort by SLA urgency, created date, or last updated
 - **Configurable refresh** — set how often the dashboard fetches fresh data (default: 30 minutes)
-- **Auto token capture** — no manual setup needed; the script captures your Intercom session automatically
+- **Status indicator** — the floating button's dot changes colour to reflect the current state: red (no token), pulsing blue (loading), green (data fresh), amber (data stale), flashing red (error)
+- **Automatic admin detection** — detects your identity from Intercom's session data; no manual selection needed
+- **Data caching** — conversation data is cached in localStorage so the dashboard opens instantly with cached data while a background refresh runs
 
 ## Auto-Updates
 
@@ -56,15 +58,25 @@ When a new version is pushed to this repo, Tampermonkey will detect it and updat
 
 Click the **⚙ Settings** button inside the dashboard to:
 
-- Manually enter an Intercom API token if auto-capture didn't work
+- Enter your Intercom API token (generated at Settings → Developers → API Keys)
 - Set your preferred auto-refresh interval (in minutes)
-- Clear all saved data
+- Clear all saved data (token, cache, preferences)
 
 ## How It Works
 
-The script runs inside Intercom's web app via Tampermonkey. It captures your existing session token from Intercom's own API calls (no separate login needed) and queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
+The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.4.0 — Performance & UX overhaul
+- **Dramatically faster perceived load** — dashboard opens instantly with cached data; fresh data loads in the background. No more waiting minutes on every open
+- **Data caching** — all conversation datasets are persisted to localStorage; stale data is shown immediately while a background refresh runs
+- **Status indicator on floating button** — coloured dot shows current state: red (no token), pulsing blue (loading), green (fresh), amber (stale), flashing red (error)
+- **Automatic admin detection** — reads your identity from Intercom's Ember session; falls back to the admins list if needed (no manual picker or user selection step)
+- **Removed session sniffing** — eliminated XHR/fetch interception that caused infinite `user_presence.json` polling and page slowdowns. Users now enter their API token once via Settings
+- **Lighter footprint** — removed `@run-at document-start` and `unsafeWindow` grants; script no longer patches browser globals
+- First click auto-opens Settings if no token is configured
+- Full loading spinner only appears on the very first load (no cache yet)
 
 ### v2.3.0
 - Added **Team column** with team name resolution

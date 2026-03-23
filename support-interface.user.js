@@ -1,13 +1,11 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.3.0
+// @version      2.4.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
-// @run-at       document-start
 // @grant        GM_xmlhttpRequest
-// @grant        unsafeWindow
 // @connect      api.intercom.io
 
 // @updateURL    https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js
@@ -28,6 +26,7 @@
   const STORAGE_REFRESH    = 'sii_refresh_mins';
   const STORAGE_COLUMNS    = 'sii_columns';
   const STORAGE_FILTERS    = 'sii_filters';
+  const STORAGE_CACHE      = 'sii_cache';
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
@@ -162,6 +161,32 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Data cache (localStorage)
+  // ---------------------------------------------------------------------------
+
+  function saveCache() {
+    try {
+      const payload = { ts: NOW_S(), datasets: {} };
+      for (const [k, v] of Object.entries(datasets)) payload.datasets[k] = v;
+      localStorage.setItem(STORAGE_CACHE, JSON.stringify(payload));
+    } catch (_) {}
+  }
+
+  function loadCache() {
+    try {
+      const raw = localStorage.getItem(STORAGE_CACHE);
+      if (!raw) return false;
+      const { ts, datasets: cached } = JSON.parse(raw);
+      if (!ts || !cached) return false;
+      for (const [k, v] of Object.entries(cached)) {
+        if (datasets.hasOwnProperty(k)) datasets[k] = v;
+      }
+      lastLoadedAt = ts;
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // ---------------------------------------------------------------------------
   // Token management
   // ---------------------------------------------------------------------------
 
@@ -173,53 +198,6 @@
     return v;
   }
 
-  function tryTokenFromStorage() {
-    try {
-      const raw = localStorage.getItem('ember_simple_auth-session');
-      if (raw) {
-        const d = JSON.parse(raw)?.authenticated;
-        const t = d?.access_token || d?.token;
-        if (t) return saveToken(t);
-      }
-    } catch (_) {}
-    try {
-      for (const k of ['intercom-access-token', 'access_token', 'intercom_token']) {
-        const v = localStorage.getItem(k);
-        if (v && v.length >= 20 && !v.startsWith('{')) return saveToken(v);
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  function setupTokenCapture() {
-    try {
-      const win = unsafeWindow;
-      const origSetHeader = win.XMLHttpRequest.prototype.setRequestHeader;
-      win.XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-        if (!getToken() && name.toLowerCase() === 'authorization' && value?.startsWith('Bearer ')) {
-          saveToken(value.slice(7));
-          onTokenCaptured();
-        }
-        return origSetHeader.apply(this, arguments);
-      };
-      const origFetch = win.fetch;
-      win.fetch = function (input, init) {
-        if (!getToken() && init?.headers) {
-          const h = init.headers;
-          const auth = typeof h.get === 'function'
-            ? (h.get('authorization') || h.get('Authorization'))
-            : (h['authorization'] || h['Authorization']);
-          if (auth?.startsWith('Bearer ')) { saveToken(auth.slice(7)); onTokenCaptured(); }
-        }
-        return Reflect.apply(origFetch, this, arguments);
-      };
-    } catch (e) { console.warn('[SII] Could not set up token capture:', e); }
-  }
-
-  function onTokenCaptured() {
-    if (document.getElementById('sii-waiting')) handleRefresh();
-    document.getElementById('sii-btn')?.classList.add('ready');
-  }
 
   // ---------------------------------------------------------------------------
   // Intercom API
@@ -262,13 +240,95 @@
     }
   }
 
+  function tryAdminFromSession() {
+    // Intercom stores the current admin's info in its Ember session
+    try {
+      const raw = localStorage.getItem('ember_simple_auth-session');
+      if (raw) {
+        const auth = JSON.parse(raw)?.authenticated;
+        if (auth?.admin_id) {
+          currentAdminId = String(auth.admin_id);
+          localStorage.setItem(STORAGE_ADMIN_ID, currentAdminId);
+          // Name may also be available
+          if (auth.name || auth.email) {
+            currentAdminName = auth.name || auth.email;
+            localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
+          }
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   async function ensureAdminInfo() {
     if (currentAdminId) return;
-    const me = await apiRequest({ path: '/me' });
-    currentAdminId   = String(me.id);
-    currentAdminName = me.name || me.email || 'You';
+    // Try to get admin ID from Intercom's own session data (no API call)
+    if (tryAdminFromSession()) {
+      // If we got the ID but not the name, resolve it from the admins list
+      if (!currentAdminName) {
+        try {
+          const resp = await apiRequest({ path: '/admins' });
+          const admins = resp.admins ?? resp.data ?? [];
+          const me = admins.find(a => String(a.id) === currentAdminId);
+          if (me) {
+            currentAdminName = me.name || me.email || 'You';
+            localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
+          }
+        } catch (_) {}
+      }
+      return;
+    }
+    // Fallback: fetch admins list and match by looking at who's logged in
+    // This covers edge cases where the Ember session key format changes
+    const resp = await apiRequest({ path: '/admins' });
+    const admins = (resp.admins ?? resp.data ?? []).filter(a => a.type === 'admin');
+    if (admins.length === 0) throw new Error('No admins found. Check your API token permissions.');
+    // If only one admin, use them
+    if (admins.length === 1) {
+      currentAdminId   = String(admins[0].id);
+      currentAdminName = admins[0].name || admins[0].email || 'You';
+    } else {
+      // Try to match via Intercom's cookie or page context
+      const match = tryMatchAdminFromPage(admins);
+      if (match) {
+        currentAdminId   = String(match.id);
+        currentAdminName = match.name || match.email || 'You';
+      } else {
+        // Last resort: use the first non-bot admin
+        const first = admins[0];
+        currentAdminId   = String(first.id);
+        currentAdminName = first.name || first.email || 'You';
+        console.warn('[SII] Could not detect current admin — defaulting to:', currentAdminName);
+      }
+    }
     localStorage.setItem(STORAGE_ADMIN_ID,   currentAdminId);
     localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
+  }
+
+  function tryMatchAdminFromPage(admins) {
+    // Try to find the admin's email/name from Intercom's page context
+    try {
+      const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+      // Intercom sometimes exposes the current admin on the app object
+      const appAdmin = win.Intercom?.booted_data?.admin
+        || win.__INTERCOM_ADMIN__
+        || null;
+      if (appAdmin?.id) {
+        const m = admins.find(a => String(a.id) === String(appAdmin.id));
+        if (m) return m;
+      }
+      // Match by email from Ember session (even if admin_id wasn't there)
+      const raw = localStorage.getItem('ember_simple_auth-session');
+      if (raw) {
+        const auth = JSON.parse(raw)?.authenticated;
+        if (auth?.email) {
+          const m = admins.find(a => a.email === auth.email);
+          if (m) return m;
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   async function fetchAllConvs(conditions) {
@@ -329,6 +389,7 @@
 
     clearDismissed();
     urgencyFilter = null;
+    saveCache();
 
     if (debugMode) {
       console.group('[SII Debug] Dataset load complete');
@@ -522,10 +583,28 @@
     }
     #sii-btn:hover { background: #1a5f9a; }
     #sii-btn .sii-dot {
-      width: 6px; height: 6px; border-radius: 50%; background: #f59e0b;
+      width: 7px; height: 7px; border-radius: 50%;
       flex-shrink: 0; position: absolute; top: 4px; right: 4px;
+      transition: background 0.3s;
     }
-    #sii-btn.ready .sii-dot { background: #4caf50; }
+    /* No token */
+    #sii-btn.st-none .sii-dot     { background: #e53e3e; }
+    /* Loading */
+    #sii-btn.st-loading .sii-dot  { background: #1f73b7; animation: sii-pulse 1s ease-in-out infinite; }
+    @keyframes sii-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.4; transform: scale(1.5); }
+    }
+    /* Fresh data */
+    #sii-btn.st-fresh .sii-dot    { background: #4caf50; }
+    /* Stale data */
+    #sii-btn.st-stale .sii-dot    { background: #f59e0b; }
+    /* Error on last load */
+    #sii-btn.st-error .sii-dot    { background: #e53e3e; animation: sii-err-flash 0.6s ease-in-out 3; }
+    @keyframes sii-err-flash {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.2; }
+    }
 
     #sii-overlay {
       position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 99999;
@@ -1159,7 +1238,7 @@
       return;
     }
     if (!getToken()) {
-      body.append(el('div', { id: 'sii-waiting' }, el('div', { className: 'sii-spinner' }), 'Waiting for Intercom session to be detected…', el('span', { className: 'sii-waiting-hint' }, 'Navigate around Intercom — an API call will be intercepted automatically.'), el('button', { className: 'sii-icon-btn', onClick: showSettings }, 'Enter token manually instead')));
+      body.append(el('div', { id: 'sii-waiting' }, 'No API token configured.', el('span', { className: 'sii-waiting-hint' }, 'Generate one at Settings → Developers → API Keys.'), el('button', { className: 'sii-icon-btn', onClick: showSettings }, 'Enter API token')));
       return;
     }
 
@@ -1243,8 +1322,8 @@
     refreshInput.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
     const panel = el('div', { id: 'sii-settings' },
-      el('h3', {}, 'Manual Token Setup'),
-      el('p', {}, 'Normally the token is captured automatically from Intercom\'s API calls. If that didn\'t work, paste your token below. Generate one at Settings → Developers → API Keys.'),
+      el('h3', {}, 'API Token'),
+      el('p', {}, 'Paste your Intercom API token below. Generate one at Settings → Developers → API Keys.'),
       tokenInput,
       el('h3', { style: { marginTop: '16px' } }, 'Auto-Refresh Interval'),
       el('p', {}, 'How often the dashboard fetches fresh data in the background (in minutes).'),
@@ -1257,15 +1336,17 @@
           saveToken(tokenInput.value);
           const mins = parseInt(refreshInput.value, 10);
           if (mins && mins >= 1) localStorage.setItem(STORAGE_REFRESH, String(mins));
-          currentAdminId = null;
+          currentAdminId = null; currentAdminName = null;          localStorage.removeItem(STORAGE_ADMIN_ID);
+          localStorage.removeItem(STORAGE_ADMIN_NAME);
           hideSettings();
           handleRefresh();
         }}, 'Save & Load'),
         el('button', { className: 'sii-danger-btn', onClick() {
-          [STORAGE_TOKEN, STORAGE_ADMIN_ID, STORAGE_ADMIN_NAME, STORAGE_DISMISSED, STORAGE_REFRESH].forEach(k => localStorage.removeItem(k));
-          currentAdminId = null; currentAdminName = null;
+          [STORAGE_TOKEN, STORAGE_ADMIN_ID, STORAGE_ADMIN_NAME, STORAGE_DISMISSED, STORAGE_REFRESH, STORAGE_CACHE].forEach(k => localStorage.removeItem(k));
+          currentAdminId = null; currentAdminName = null; lastLoadedAt = 0;
           clearDismissed();
           hideSettings();
+          updateButtonStatus('st-none');
         }}, 'Clear saved data'),
       ),
     );
@@ -1365,16 +1446,24 @@
   function openModal() {
     if (document.getElementById('sii-overlay')) return;
     document.body.append(buildModal());
+
+    // Try to restore cached data if we have nothing in memory
     const hasData = lastLoadedAt > 0;
-    const isFresh = hasData && (NOW_S() - lastLoadedAt < getStaleSecs());
-    if (isFresh) {
-      renderStats(getStats());
+    if (!hasData) loadCache();
+    const hasCached = lastLoadedAt > 0;
+    const isFresh = hasCached && (NOW_S() - lastLoadedAt < getStaleSecs());
+
+    if (hasCached) {
+      // Show cached data immediately
+      renderStats(getStats(), !isFresh);
       const convs = getActiveConversations();
       renderList(convs);
       renderFooter(convs);
       renderUrgencyFilter();
+      // Background-refresh if stale
+      if (!isFresh) handleRefresh();
     } else {
-      renderStats(hasData ? getStats() : {}, true);
+      renderStats({}, true);
       handleRefresh();
     }
   }
@@ -1386,19 +1475,45 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Button status indicator
+  // ---------------------------------------------------------------------------
+
+  const BTN_STATES = ['st-none', 'st-loading', 'st-fresh', 'st-stale', 'st-error'];
+
+  function updateButtonStatus(state) {
+    const btn = document.getElementById('sii-btn');
+    if (!btn) return;
+    btn.classList.remove(...BTN_STATES);
+    btn.classList.add(state);
+  }
+
+  function computeButtonStatus() {
+    if (!getToken()) return 'st-none';
+    if (isLoading) return 'st-loading';
+    if (lastLoadedAt <= 0) return 'st-none';
+    if (NOW_S() - lastLoadedAt < getStaleSecs()) return 'st-fresh';
+    return 'st-stale';
+  }
+
+  // ---------------------------------------------------------------------------
   // Refresh
   // ---------------------------------------------------------------------------
 
   async function handleRefresh() {
     if (isLoading) return;
-    if (!getToken()) { renderList([]); return; }
+    if (!getToken()) { updateButtonStatus('st-none'); renderList([]); return; }
 
     isLoading = true;
+    updateButtonStatus('st-loading');
+    const hasCachedData = lastLoadedAt > 0;
     document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.add('sii-loading'));
-    const body = document.getElementById('sii-body');
-    if (body) {
-      body.innerHTML = '';
-      body.append(el('div', { id: 'sii-loading' }, el('div', { className: 'sii-spinner' }), 'Loading all datasets…', el('span', { className: 'sii-loading-sub' }, 'Fetching backlog, assignments, replies, closed, and unassigned in parallel…')));
+    // Only show full-screen spinner if there's no cached data to display
+    if (!hasCachedData) {
+      const body = document.getElementById('sii-body');
+      if (body) {
+        body.innerHTML = '';
+        body.append(el('div', { id: 'sii-loading' }, el('div', { className: 'sii-spinner' }), 'Loading all datasets…', el('span', { className: 'sii-loading-sub' }, 'Fetching backlog, assignments, replies, closed, and unassigned in parallel…')));
+      }
     }
 
     try {
@@ -1408,9 +1523,12 @@
       await loadAllDatasets();
       lastLoadedAt = NOW_S();
       isLoading = false;
+      updateButtonStatus('st-fresh');
       const stats = getStats(), convs = getActiveConversations();
       renderStats(stats); renderList(convs); renderFooter(convs); renderUrgencyFilter();
     } catch (err) {
+      isLoading = false;
+      updateButtonStatus('st-error');
       const body = document.getElementById('sii-body');
       if (body) { body.innerHTML = ''; body.append(el('div', { id: 'sii-empty' }, `⚠️ ${err.message}. Try refreshing or check your token in ⚙ Settings.`)); }
     } finally {
@@ -1424,43 +1542,54 @@
   // ---------------------------------------------------------------------------
 
   function init() {
-    if (!getToken()) tryTokenFromStorage();
     const style = document.createElement('style');
     style.textContent = CSS;
     document.head.append(style);
 
     document.body.append(el('button', {
-      id: 'sii-btn', className: getToken() ? 'ready' : '', onClick: openModal,
+      id: 'sii-btn', onClick: () => {
+        if (!getToken()) { openModal(); showSettings(); return; }
+        openModal();
+      },
     }, '☰', el('span', { className: 'sii-dot' })));
+    updateButtonStatus(computeButtonStatus());
 
     setInterval(async () => {
+      // Keep button dot in sync (green → amber when data goes stale)
+      if (!isLoading) updateButtonStatus(computeButtonStatus());
       if (!getToken() || isLoading) return;
       if (NOW_S() - lastLoadedAt < getStaleSecs()) return;
       try {
+        isLoading = true;
+        updateButtonStatus('st-loading');
         await ensureAdminInfo();
         await loadAllDatasets();
         lastLoadedAt = NOW_S();
+        isLoading = false;
+        updateButtonStatus('st-fresh');
         if (document.getElementById('sii-overlay') && !settingsVisible) {
           const stats = getStats(), convs = getActiveConversations();
           renderStats(stats); renderList(convs); renderFooter(convs); renderUrgencyFilter();
         }
-      } catch (_) {}
+      } catch (_) {
+        isLoading = false;
+        updateButtonStatus('st-error');
+      }
     }, 60 * 1000);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 
-  setupTokenCapture();
-
   // Debug tools
   try {
-    unsafeWindow.siiDebug = (on) => {
+    const _w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    _w.siiDebug = (on) => {
       debugMode = (on === undefined) ? !debugMode : !!on;
       console.log(`[SII] Debug mode ${debugMode ? 'ON' : 'OFF'}`);
       return debugMode;
     };
-    unsafeWindow.siiInspect = async (...ids) => {
+    _w.siiInspect = async (...ids) => {
       if (!ids.length) { console.log('[SII] Usage: siiInspect(123456, 789012)'); return; }
       const adminIdStr = String(currentAdminId);
       console.log(`[SII] Inspecting ${ids.length} conversation(s)… Admin ID: ${adminIdStr}`);
@@ -1481,7 +1610,7 @@
         } catch (err) { console.error(`[SII Inspect] Failed to fetch #${id}:`, err); }
       }
     };
-    unsafeWindow.siiSla = (n = 5) => {
+    _w.siiSla = (n = 5) => {
       const convs = datasets[F_BACKLOG].slice(0, n);
       if (!convs.length) { console.log('[SII] No backlog data loaded yet.'); return; }
       console.group(`[SII SLA] Raw sla_applied for first ${convs.length} backlog conversations`);
