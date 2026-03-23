@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.6.0
+// @version      2.6.1
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -535,6 +535,25 @@
       if (sortMode === 'created_desc') return b.created_at - a.created_at;
       if (sortMode === 'updated_asc')  return (a.updated_at ?? 0) - (b.updated_at ?? 0);
       if (sortMode === 'updated_desc') return (b.updated_at ?? 0) - (a.updated_at ?? 0);
+
+      if (sortMode === 'company_asc' || sortMode === 'company_desc') {
+        const ca = (convCompanyMap[String(a.id)] || '').toLowerCase();
+        const cb = (convCompanyMap[String(b.id)] || '').toLowerCase();
+        // Push empty company names to the end regardless of direction
+        if (!ca && cb) return 1;
+        if (ca && !cb) return -1;
+        const diff = ca.localeCompare(cb);
+        return sortMode === 'company_desc' ? -diff : diff;
+      }
+
+      if (sortMode === 'urgency_asc' || sortMode === 'urgency_desc') {
+        const urgOrd = { critical: 0, high: 1, medium: 2, low: 3 };
+        const ua = urgOrd[(getUrgency(a) || '').toLowerCase()] ?? 99;
+        const ub = urgOrd[(getUrgency(b) || '').toLowerCase()] ?? 99;
+        const diff = ua - ub;
+        return sortMode === 'urgency_desc' ? -diff : diff;
+      }
+
       const slaOrd = c => {
         const sla = c.sla_applied;
         if (!sla) return Infinity;
@@ -1688,6 +1707,8 @@
 
   const SORT_CATS = [
     { key: 'sla', label: 'SLA', defaultDir: 'asc' },
+    { key: 'urgency', label: 'Urgency', defaultDir: 'asc' },
+    { key: 'company', label: 'Company', defaultDir: 'asc' },
     { key: 'created', label: 'Created', defaultDir: 'desc' },
     { key: 'updated', label: 'Last Updated', defaultDir: 'desc' },
   ];
