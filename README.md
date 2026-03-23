@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.4.0-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.5.0-blue)
 
 ## Install
 
@@ -26,9 +26,10 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 
 ### Table
 - **Configurable columns** — show, hide, and reorder columns to your preference; layout is saved between sessions
-- **Columns available:** ID, Subject/Preview, SLA, Status, Assignee, Team, Urgency, Priority, Created, Last Updated
+- **Columns available:** ID, Subject/Preview, SLA, Urgency, Priority, Company, Team, Created, Last Updated
 - **Urgency column** — shows the ticket urgency badge (e.g. High, Medium, Low)
 - **Priority column** — flags conversations marked as priority in Intercom
+- **Company column** — shows the company name associated with the conversation's contact
 - **Team column** — displays the assigned team name
 
 ### Filters
@@ -67,6 +68,10 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.5.0
+- **Company column** — resolves and displays company names from conversation contacts via the Intercom Companies API
+- Companies are fetched once and cached; contact-to-company mapping is resolved in batches for performance
 
 ### v2.4.0 — Performance & UX overhaul
 - **Dramatically faster perceived load** — dashboard opens instantly with cached data; fresh data loads in the background. No more waiting minutes on every open

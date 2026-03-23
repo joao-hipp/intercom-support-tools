@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.4.0
+// @version      2.5.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -78,6 +78,7 @@
     { id: 'sla',      label: 'SLA' },
     { id: 'urgency',  label: 'Urgency' },
     { id: 'priority', label: 'Priority' },
+    { id: 'company',  label: 'Company' },
     { id: 'team',     label: 'Team' },
     { id: 'created',  label: 'Created' },
     { id: 'updated',  label: 'Updated' },
@@ -166,7 +167,7 @@
 
   function saveCache() {
     try {
-      const payload = { ts: NOW_S(), datasets: {} };
+      const payload = { ts: NOW_S(), datasets: {}, convCompanyMap };
       for (const [k, v] of Object.entries(datasets)) payload.datasets[k] = v;
       localStorage.setItem(STORAGE_CACHE, JSON.stringify(payload));
     } catch (_) {}
@@ -176,11 +177,12 @@
     try {
       const raw = localStorage.getItem(STORAGE_CACHE);
       if (!raw) return false;
-      const { ts, datasets: cached } = JSON.parse(raw);
+      const { ts, datasets: cached, convCompanyMap: cachedCompanies } = JSON.parse(raw);
       if (!ts || !cached) return false;
       for (const [k, v] of Object.entries(cached)) {
         if (datasets.hasOwnProperty(k)) datasets[k] = v;
       }
+      if (cachedCompanies) convCompanyMap = cachedCompanies;
       lastLoadedAt = ts;
       return true;
     } catch (_) { return false; }
@@ -227,7 +229,9 @@
     });
   }
 
-  let teamsMap = null; // id → name, loaded once
+  let teamsMap = null;      // id → name, loaded once
+  let companiesMap = null;  // id → name, loaded once
+  let convCompanyMap = {};  // conv_id → company name
 
   async function ensureTeamsMap() {
     if (teamsMap) return;
@@ -237,6 +241,72 @@
       teamsMap = Object.fromEntries(list.map(t => [String(t.id), t.name]));
     } catch (_) {
       teamsMap = {};
+    }
+  }
+
+  async function ensureCompaniesMap() {
+    if (companiesMap) return;
+    try {
+      const all = [];
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const resp = await apiRequest({ path: `/companies?per_page=60&page=${page}` });
+        const list = resp.data ?? resp.companies ?? [];
+        all.push(...list);
+        totalPages = resp.pages?.total_pages ?? 1;
+        page++;
+      } while (page <= totalPages);
+      companiesMap = Object.fromEntries(all.map(c => [String(c.id), c.name]));
+    } catch (_) {
+      companiesMap = {};
+    }
+  }
+
+  async function resolveConvCompanies(allConvs) {
+    // Collect unique contact IDs from all conversations
+    const contactIds = new Set();
+    for (const conv of allConvs) {
+      const contacts = conv.contacts?.contacts ?? conv.contacts?.data ?? [];
+      for (const c of contacts) if (c.id) contactIds.add(c.id);
+    }
+    if (!contactIds.size) return;
+
+    // Fetch contacts in batches to get their company associations
+    const contactCompany = {}; // contact_id → company_name
+    const ids = [...contactIds];
+    const BATCH = 50;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      try {
+        const resp = await apiRequest({
+          method: 'POST',
+          path: '/contacts/search',
+          body: {
+            query: { field: 'id', operator: 'IN', value: batch },
+            pagination: { per_page: 150 },
+          },
+        });
+        for (const contact of (resp.data ?? [])) {
+          const companies = contact.companies?.data ?? contact.companies?.companies ?? [];
+          if (companies.length) {
+            const compId = String(companies[0].id);
+            contactCompany[contact.id] = companiesMap?.[compId] ?? companies[0].name ?? compId;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Map conv → company via first contact
+    convCompanyMap = {};
+    for (const conv of allConvs) {
+      const contacts = conv.contacts?.contacts ?? conv.contacts?.data ?? [];
+      for (const c of contacts) {
+        if (contactCompany[c.id]) {
+          convCompanyMap[String(conv.id)] = contactCompany[c.id];
+          break;
+        }
+      }
     }
   }
 
@@ -349,7 +419,7 @@
   // ---------------------------------------------------------------------------
 
   async function loadAllDatasets() {
-    await ensureTeamsMap();
+    await Promise.all([ensureTeamsMap(), ensureCompaniesMap()]);
     const adminId = parseInt(currentAdminId, 10);
 
     // Unassigned: conversations where the individual assignee is empty
@@ -386,6 +456,10 @@
     datasets[F_REPLIED_WEEK]   = repliedThisWeek;
     datasets[F_REPLIED_TODAY]  = repliedThisWeek.filter(c => (c.statistics?.last_admin_reply_at ?? 0) >= TODAY_START_S);
     datasets[F_UNASSIGNED]     = unassigned.filter(c => !c.assignee || c.assignee.type === 'nobody');
+
+    // Resolve company names from contacts (non-blocking for cache)
+    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned].map(c => [c.id, c])).values()];
+    await resolveConvCompanies(allConvs);
 
     clearDismissed();
     urgencyFilter = null;
@@ -1170,6 +1244,11 @@
               : el('span', { className: 'sii-badge none' }, '—')
           ));
           break;
+        case 'company': {
+          const companyName = convCompanyMap[String(conv.id)] || '—';
+          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, companyName)));
+          break;
+        }
         case 'team': {
           const team = conv.team_assignee_id
             ? (teamsMap?.[String(conv.team_assignee_id)] ?? `Team ${conv.team_assignee_id}`)
@@ -1223,7 +1302,7 @@
   function buildTableHeader(canDismiss) {
     const labels = {
       id: '#', subject: 'Subject / Preview', sla: 'SLA',
-      urgency: 'Urgency', priority: 'Priority', team: 'Team', created: 'Created', updated: 'Updated',
+      urgency: 'Urgency', priority: 'Priority', company: 'Company', team: 'Team', created: 'Created', updated: 'Updated',
     };
     const ths = activeColumns.map(id => `<th>${labels[id] ?? id}</th>`).join('');
     return `<tr>${ths}${canDismiss ? '<th></th>' : ''}</tr>`;
