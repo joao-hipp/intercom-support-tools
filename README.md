@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.6.1-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.7.0-blue)
 
 ## Install
 
@@ -26,7 +26,7 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 
 ### Table
 - **Configurable columns** — show, hide, and reorder columns to your preference; layout is saved between sessions
-- **Columns available:** ID, Subject/Preview, SLA, Urgency, Priority, Company, Team, Created, Last Updated
+- **Columns available:** ID, Subject/Preview, SLA, Urgency, Priority, Responses, Company, Team, Created, Last Updated
 - **Urgency column** — shows the ticket urgency badge (e.g. High, Medium, Low)
 - **Priority column** — flags conversations marked as priority in Intercom
 - **Company column** — shows the company name associated with the conversation's contact
@@ -35,6 +35,7 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 ### Filters
 - **Urgency filter** — filter the table to a specific urgency level
 - **Unassigned filter** — show only conversations with no assignee
+- **Unanswered filter** — show backlog conversations you haven't replied to yet
 - **Configurable filter bar** — show, hide, and reorder filter chips; layout is saved between sessions
 
 ### Other
@@ -43,6 +44,7 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 - **Configurable refresh** — set how often the dashboard fetches fresh data (default: 30 minutes)
 - **Status indicator** — the floating button's dot changes colour to reflect the current state: red (no token), pulsing blue (loading), green (data fresh), amber (data stale), flashing red (error)
 - **Automatic admin detection** — detects your identity from Intercom's session data; no manual selection needed
+- **Progressive loading** — stat cards update individually as each data group resolves; no more waiting for all queries to finish
 - **Data caching** — conversation data is cached in localStorage so the dashboard opens instantly with cached data while a background refresh runs
 
 ## Auto-Updates
@@ -68,6 +70,13 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.7.0
+- **Responses column** — shows how many public replies you've sent on each conversation; sortable
+- **Unanswered filter** — surfaces backlog conversations you haven't replied to yet (assigned to you, zero public replies from you)
+- **Progressive loading on refresh** — stat cards update individually as each data group resolves instead of waiting for everything to finish
+- **Improved reply detection** — counts replies by checking for actual message body content; excludes Fin bot messages, internal notes, and system events (assignments, tags, etc.)
+- **Response counts cached** — `convResponsesMap` is persisted to localStorage so response data loads instantly from cache
 
 ### v2.6.1
 - **Sort by Company** — alphabetical A→Z or Z→A; no-company conversations pushed to the bottom

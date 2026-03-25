@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.6.1
+// @version      2.7.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -51,6 +51,7 @@
   const F_REPLIED_WEEK     = 'repliedThisWeek';
   const F_CLOSED_WEEK      = 'closedThisWeek';
   const F_UNASSIGNED       = 'unassigned';
+  const F_UNANSWERED       = 'unanswered';
 
   // Filters that support the dismiss feature
   const DISMISSABLE_FILTERS = new Set([F_BACKLOG, F_SLA_BREACHED, F_SLA_WARNING]);
@@ -66,6 +67,7 @@
     { key: F_REPLIED_TODAY,  label: 'Replied Today',       sub: 'my replies only',    cls: 'green',   required: false },
     { key: F_REPLIED_WEEK,   label: 'Replied This Week',   sub: 'since Sunday',       cls: 'green',   required: false },
     { key: F_CLOSED_WEEK,    label: 'Closed This Week',    sub: 'since Sunday',       cls: 'purple',  required: false },
+    { key: F_UNANSWERED,     label: 'Unanswered',          sub: 'no reply from me',   cls: 'danger',  required: false },
   ];
 
   // ---------------------------------------------------------------------------
@@ -78,6 +80,7 @@
     { id: 'sla',      label: 'SLA' },
     { id: 'urgency',  label: 'Urgency' },
     { id: 'priority', label: 'Priority' },
+    { id: 'responses', label: 'Responses' },
     { id: 'company',  label: 'Company' },
     { id: 'team',     label: 'Team' },
     { id: 'created',  label: 'Created' },
@@ -127,7 +130,7 @@
   const datasets = {
     [F_BACKLOG]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
     [F_REPLIED_TODAY]: [], [F_REPLIED_WEEK]: [], [F_CLOSED_WEEK]: [],
-    [F_UNASSIGNED]: [],
+    [F_UNASSIGNED]: [], [F_UNANSWERED]: [],
   };
 
   let dismissedIds = new Set(JSON.parse(localStorage.getItem(STORAGE_DISMISSED) || '[]'));
@@ -172,6 +175,7 @@
         ts: NOW_S(),
         datasets: {},
         convCompanyMap,
+        convResponsesMap,
         teamsMap: teamsMap || {},
       };
       for (const [k, v] of Object.entries(datasets)) payload.datasets[k] = v;
@@ -190,6 +194,7 @@
         if (datasets.hasOwnProperty(k)) datasets[k] = v;
       }
       if (parsed.convCompanyMap) convCompanyMap = parsed.convCompanyMap;
+      if (parsed.convResponsesMap) convResponsesMap = parsed.convResponsesMap;
       if (parsed.teamsMap) teamsMap = parsed.teamsMap;
       lastLoadedAt = ts;
       return true;
@@ -239,7 +244,8 @@
 
   let teamsMap = null;      // id → name, loaded once
   let companiesMap = null;  // id → name, loaded once
-  let convCompanyMap = {};  // conv_id → company name
+  let convCompanyMap = {};   // conv_id → company name
+  let convResponsesMap = {}; // conv_id → number of admin replies
 
   async function ensureTeamsMap() {
     if (teamsMap) return;
@@ -331,6 +337,45 @@
           console.log('[SII] Sample contact response:', JSON.stringify(sample, null, 2));
         } catch (_) {}
       }
+    }
+  }
+
+  function isAdminPublicReply(part, adminIdStr) {
+    if (part.author?.type !== 'admin') return false;           // excludes bots (Fin), users
+    if (String(part.author?.id) !== adminIdStr) return false;  // not this admin
+    if (part.part_type === 'note') return false;               // internal notes
+    // A real reply has message body content; system events (assignments, tags, etc.) don't
+    const body = part.body;
+    if (!body || !body.replace(/<[^>]+>/g, '').trim()) return false;
+    return true;
+  }
+
+  async function resolveConvResponses(convs, merge = false) {
+    const adminIdStr = String(currentAdminId);
+    if (!merge) convResponsesMap = {};
+    const ids = convs.map(c => String(c.id)).filter(id => !merge || !convResponsesMap.hasOwnProperty(id));
+    if (!ids.length) return;
+    const CONCURRENCY = 5;
+    for (let i = 0; i < ids.length; i += CONCURRENCY) {
+      const batch = ids.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(id => apiRequest({ path: `/conversations/${id}` }))
+      );
+      results.forEach((result, idx) => {
+        if (result.status !== 'fulfilled') return;
+        const detail = result.value;
+        const parts = detail.conversation_parts?.conversation_parts ?? [];
+        let count = parts.filter(p => isAdminPublicReply(p, adminIdStr)).length;
+        // Also check the source/initial message — if this admin started the conversation, that counts
+        const src = detail.source;
+        if (src?.author?.type === 'admin' && String(src.author?.id) === adminIdStr) {
+          count++;
+        }
+        convResponsesMap[batch[idx]] = count;
+      });
+    }
+    if (debugMode) {
+      console.log(`[SII] Response counts resolved for ${Object.keys(convResponsesMap).length}/${convs.length} conversations${merge ? ' (background)' : ''}`);
     }
   }
 
@@ -442,53 +487,97 @@
   // Data loading
   // ---------------------------------------------------------------------------
 
-  async function loadAllDatasets() {
+  // onProgress(readyKeys) is called as each group of filters becomes available
+  async function loadAllDatasets(onProgress) {
     await Promise.all([ensureTeamsMap(), ensureCompaniesMap()]);
     const adminId = parseInt(currentAdminId, 10);
+    const notify = onProgress || (() => {});
 
-    // Unassigned: conversations where the individual assignee is empty
+    // --- Phase 1: fire all search queries in parallel ---
     const unassignedPromise = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
       { field: 'admin_assignee_id', operator: '=', value: 0 },
     ]).catch(() => []);
 
+    // Wrap each query so we can notify as each resolves
+    const backlogP = fetchAllConvs([
+      { field: 'state', operator: '=', value: 'open' },
+      { field: 'admin_assignee_id', operator: '=', value: adminId },
+    ]).then(data => {
+      datasets[F_BACKLOG] = data;
+      notify([F_BACKLOG, F_SLA_BREACHED, F_SLA_WARNING]);
+      return data;
+    });
+
+    const assignedWeekP = fetchAllConvs([
+      { field: 'admin_assignee_id', operator: '=', value: adminId },
+      { field: 'statistics.last_assignment_at', operator: '>=', value: WEEK_START_S },
+    ]).then(data => {
+      datasets[F_ASSIGNED_WEEK] = data;
+      datasets[F_ASSIGNED_TODAY] = data.filter(c => (c.statistics?.last_assignment_at ?? 0) >= TODAY_START_S);
+      notify([F_ASSIGNED_WEEK, F_ASSIGNED_TODAY]);
+      return data;
+    });
+
+    const repliedWeekP = fetchAllConvs([
+      { field: 'admin_assignee_id', operator: '=', value: adminId },
+      { field: 'statistics.last_admin_reply_at', operator: '>=', value: WEEK_START_S },
+    ]).then(data => {
+      datasets[F_REPLIED_WEEK] = data;
+      datasets[F_REPLIED_TODAY] = data.filter(c => (c.statistics?.last_admin_reply_at ?? 0) >= TODAY_START_S);
+      notify([F_REPLIED_WEEK, F_REPLIED_TODAY]);
+      return data;
+    });
+
+    const closedWeekP = fetchAllConvs([
+      { field: 'state', operator: '=', value: 'closed' },
+      { field: 'admin_assignee_id', operator: '=', value: adminId },
+      { field: 'statistics.last_close_at', operator: '>=', value: WEEK_START_S },
+    ]).then(data => {
+      datasets[F_CLOSED_WEEK] = data;
+      notify([F_CLOSED_WEEK]);
+      return data;
+    });
+
+    const unassignedP = unassignedPromise.then(data => {
+      datasets[F_UNASSIGNED] = data.filter(c => !c.assignee || c.assignee.type === 'nobody');
+      notify([F_UNASSIGNED]);
+      return data;
+    });
+
     const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned] = await Promise.all([
-      fetchAllConvs([
-        { field: 'state', operator: '=', value: 'open' },
-        { field: 'admin_assignee_id', operator: '=', value: adminId },
-      ]),
-      fetchAllConvs([
-        { field: 'admin_assignee_id', operator: '=', value: adminId },
-        { field: 'statistics.last_assignment_at', operator: '>=', value: WEEK_START_S },
-      ]),
-      fetchAllConvs([
-        { field: 'admin_assignee_id', operator: '=', value: adminId },
-        { field: 'statistics.last_admin_reply_at', operator: '>=', value: WEEK_START_S },
-      ]),
-      fetchAllConvs([
-        { field: 'state', operator: '=', value: 'closed' },
-        { field: 'admin_assignee_id', operator: '=', value: adminId },
-        { field: 'statistics.last_close_at', operator: '>=', value: WEEK_START_S },
-      ]),
-      unassignedPromise,
+      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP,
     ]);
 
-    datasets[F_BACKLOG]        = backlog;
-    datasets[F_ASSIGNED_WEEK]  = assignedThisWeek;
-    datasets[F_ASSIGNED_TODAY] = assignedThisWeek.filter(c => (c.statistics?.last_assignment_at ?? 0) >= TODAY_START_S);
-    datasets[F_CLOSED_WEEK]    = closedThisWeek;
-    datasets[F_REPLIED_WEEK]   = repliedThisWeek;
-    datasets[F_REPLIED_TODAY]  = repliedThisWeek.filter(c => (c.statistics?.last_admin_reply_at ?? 0) >= TODAY_START_S);
-    datasets[F_UNASSIGNED]     = unassigned.filter(c => !c.assignee || c.assignee.type === 'nobody');
-
-    // Resolve company names from contacts (non-blocking for cache)
+    // --- Phase 2: resolve companies + backlog responses (for unanswered) ---
     const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned].map(c => [c.id, c])).values()];
-    await resolveConvCompanies(allConvs);
+    await Promise.all([
+      resolveConvCompanies(allConvs),
+      resolveConvResponses(backlog),
+    ]);
+
+    datasets[F_UNANSWERED] = backlog.filter(c => {
+      const id = String(c.id);
+      return convResponsesMap.hasOwnProperty(id) && convResponsesMap[id] === 0;
+    });
+    notify([F_UNANSWERED]);
 
     clearDismissed();
     urgencyFilter = null;
     companyFilter = null;
     saveCache();
+
+    // --- Phase 3: resolve remaining response counts in background ---
+    const remaining = allConvs.filter(c => !convResponsesMap.hasOwnProperty(String(c.id)));
+    if (remaining.length) {
+      resolveConvResponses(remaining, true).then(() => {
+        saveCache();
+        if (document.getElementById('sii-overlay') && !settingsVisible) {
+          const convs = getActiveConversations();
+          renderList(convs); renderFooter(convs);
+        }
+      }).catch(() => {});
+    }
 
     if (debugMode) {
       console.group('[SII Debug] Dataset load complete');
@@ -536,6 +625,13 @@
       if (sortMode === 'updated_asc')  return (a.updated_at ?? 0) - (b.updated_at ?? 0);
       if (sortMode === 'updated_desc') return (b.updated_at ?? 0) - (a.updated_at ?? 0);
 
+      if (sortMode === 'responses_asc' || sortMode === 'responses_desc') {
+        const ra = convResponsesMap[String(a.id)] ?? -1;
+        const rb = convResponsesMap[String(b.id)] ?? -1;
+        const diff = ra - rb;
+        return sortMode === 'responses_desc' ? -diff : diff;
+      }
+
       if (sortMode === 'company_asc' || sortMode === 'company_desc') {
         const ca = (convCompanyMap[String(a.id)] || '').toLowerCase();
         const cb = (convCompanyMap[String(b.id)] || '').toLowerCase();
@@ -581,6 +677,7 @@
       [F_REPLIED_WEEK]:   datasets[F_REPLIED_WEEK].length,
       [F_CLOSED_WEEK]:    datasets[F_CLOSED_WEEK].length,
       [F_UNASSIGNED]:     datasets[F_UNASSIGNED].length,
+      [F_UNANSWERED]:     datasets[F_UNANSWERED].length,
     };
   }
 
@@ -665,7 +762,7 @@
       [F_BACKLOG]: 'Backlog', [F_SLA_BREACHED]: 'SLA Breached', [F_SLA_WARNING]: 'SLA Warning',
       [F_ASSIGNED_TODAY]: 'Assigned to Me Today', [F_ASSIGNED_WEEK]: 'Assigned to Me This Week',
       [F_REPLIED_TODAY]: 'Replied Today', [F_REPLIED_WEEK]: 'Replied This Week',
-      [F_CLOSED_WEEK]: 'Closed This Week', [F_UNASSIGNED]: 'Unassigned',
+      [F_CLOSED_WEEK]: 'Closed This Week', [F_UNASSIGNED]: 'Unassigned', [F_UNANSWERED]: 'Unanswered',
     };
     return labels[key] || key;
   }
@@ -981,6 +1078,16 @@
       );
       card.dataset.statKey = key;
       container.append(card);
+    }
+  }
+
+  function updateStatCards(keys, stats) {
+    for (const key of keys) {
+      const card = document.querySelector(`.sii-stat-card[data-stat-key="${key}"]`);
+      if (!card) continue;
+      card.classList.remove('sii-loading');
+      const valEl = card.querySelector('.sii-stat-value');
+      if (valEl) valEl.textContent = String(stats[key] ?? 0);
     }
   }
 
@@ -1465,6 +1572,13 @@
               : el('span', { className: 'sii-badge none' }, '—')
           ));
           break;
+        case 'responses': {
+          const count = convResponsesMap[String(conv.id)];
+          const display = count != null ? String(count) : '—';
+          const cls = count === 0 ? 'sii-badge breached' : count != null ? 'sii-badge ok' : 'sii-badge none';
+          cells.push(el('td', {}, el('span', { className: cls }, display)));
+          break;
+        }
         case 'company': {
           const companyName = convCompanyMap[String(conv.id)] || '—';
           cells.push(el('td', {}, el('span', { className: 'sii-ts' }, companyName)));
@@ -1523,7 +1637,7 @@
   function buildTableHeader(canDismiss) {
     const labels = {
       id: '#', subject: 'Subject / Preview', sla: 'SLA',
-      urgency: 'Urgency', priority: 'Priority', company: 'Company', team: 'Team', created: 'Created', updated: 'Updated',
+      urgency: 'Urgency', priority: 'Priority', responses: 'Responses', company: 'Company', team: 'Team', created: 'Created', updated: 'Updated',
     };
     const ths = activeColumns.map(id => `<th>${labels[id] ?? id}</th>`).join('');
     return `<tr>${ths}${canDismiss ? '<th></th>' : ''}</tr>`;
@@ -1708,6 +1822,7 @@
   const SORT_CATS = [
     { key: 'sla', label: 'SLA', defaultDir: 'asc' },
     { key: 'urgency', label: 'Urgency', defaultDir: 'asc' },
+    { key: 'responses', label: 'Responses', defaultDir: 'asc' },
     { key: 'company', label: 'Company', defaultDir: 'asc' },
     { key: 'created', label: 'Created', defaultDir: 'desc' },
     { key: 'updated', label: 'Last Updated', defaultDir: 'desc' },
@@ -1826,7 +1941,21 @@
       await ensureAdminInfo();
       const chip = document.getElementById('sii-admin-chip');
       if (chip && currentAdminName) chip.textContent = `👤 ${currentAdminName}`;
-      await loadAllDatasets();
+
+      await loadAllDatasets((readyKeys) => {
+        // Progressive update: as each search query resolves, stop its card spinner and show the count
+        const stats = getStats();
+        updateStatCards(readyKeys, stats);
+        // Re-render the table if the currently active filter just got updated
+        // SLA filters are derived from backlog, so also re-render when backlog lands
+        const activeReady = readyKeys.includes(activeFilter)
+          || (readyKeys.includes(F_BACKLOG) && (activeFilter === F_SLA_BREACHED || activeFilter === F_SLA_WARNING));
+        if (activeReady) {
+          const convs = getActiveConversations();
+          renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
+        }
+      });
+
       lastLoadedAt = NOW_S();
       isLoading = false;
       updateButtonStatus('st-fresh');
@@ -1907,10 +2036,15 @@
           console.log('SLA raw:', detail.sla_applied);
           console.log('Statistics:', detail.statistics);
           console.log(`last_admin_reply_at: ${detail.statistics?.last_admin_reply_at ? new Date(detail.statistics.last_admin_reply_at * 1000).toISOString() : 'null'}`);
+          const src = detail.source;
+          const srcIsYours = src?.author?.type === 'admin' && String(src.author?.id) === adminIdStr;
+          console.log(`Source: ${srcIsYours ? '✅ YOURS' : '—'} | author.type="${src?.author?.type}" author.id="${src?.author?.id}" author.name="${src?.author?.name}"`);
           parts.forEach((p, idx) => {
-            const isAdmin = p.author?.type === 'admin' && String(p.author?.id) === adminIdStr;
+            const counted = isAdminPublicReply(p, adminIdStr);
+            const isYours = p.author?.type === 'admin' && String(p.author?.id) === adminIdStr;
+            const tag = counted ? '✅ COUNTED' : isYours ? '⚠️ YOURS (excluded: ' + p.part_type + ')' : '—';
             const ts = p.created_at ? new Date(p.created_at * 1000).toISOString() : 'no timestamp';
-            console.log(`  [${idx}] ${isAdmin ? '✅ YOURS' : '—'} | type="${p.part_type}" | author.type="${p.author?.type}" author.id="${p.author?.id}" author.name="${p.author?.name}" | created=${ts}`);
+            console.log(`  [${idx}] ${tag} | type="${p.part_type}" | author.type="${p.author?.type}" author.id="${p.author?.id}" author.name="${p.author?.name}" | created=${ts}`);
           });
           console.groupEnd();
         } catch (err) { console.error(`[SII Inspect] Failed to fetch #${id}:`, err); }
