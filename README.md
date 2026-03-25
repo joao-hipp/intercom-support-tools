@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.7.0-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.7.1-blue)
 
 ## Install
 
@@ -70,6 +70,10 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.7.1
+- **Code cleanup** — extracted shared helpers (`refreshActiveView`, `slaBreached`/`slaWarning`, `buildDragList`), removed ~94 lines of duplicated logic across SLA filters, column/filter managers, and render calls
+- **Derived labels** — `filterLabel()` and table headers now read from existing definitions instead of maintaining separate hardcoded maps
 
 ### v2.7.0
 - **Responses column** — shows how many public replies you've sent on each conversation; sortable

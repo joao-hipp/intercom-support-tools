@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.7.0
+// @version      2.7.1
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -494,12 +494,6 @@
     const notify = onProgress || (() => {});
 
     // --- Phase 1: fire all search queries in parallel ---
-    const unassignedPromise = fetchAllConvs([
-      { field: 'state', operator: '=', value: 'open' },
-      { field: 'admin_assignee_id', operator: '=', value: 0 },
-    ]).catch(() => []);
-
-    // Wrap each query so we can notify as each resolves
     const backlogP = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
       { field: 'admin_assignee_id', operator: '=', value: adminId },
@@ -539,7 +533,10 @@
       return data;
     });
 
-    const unassignedP = unassignedPromise.then(data => {
+    const unassignedP = fetchAllConvs([
+      { field: 'state', operator: '=', value: 'open' },
+      { field: 'admin_assignee_id', operator: '=', value: 0 },
+    ]).catch(() => []).then(data => {
       datasets[F_UNASSIGNED] = data.filter(c => !c.assignee || c.assignee.type === 'nobody');
       notify([F_UNASSIGNED]);
       return data;
@@ -572,10 +569,7 @@
     if (remaining.length) {
       resolveConvResponses(remaining, true).then(() => {
         saveCache();
-        if (document.getElementById('sii-overlay') && !settingsVisible) {
-          const convs = getActiveConversations();
-          renderList(convs); renderFooter(convs);
-        }
+        if (document.getElementById('sii-overlay') && !settingsVisible) refreshActiveView();
       }).catch(() => {});
     }
 
@@ -590,21 +584,25 @@
   // Active conversations & stats
   // ---------------------------------------------------------------------------
 
-  function getActiveConversations() {
+  function slaBreached(backlog) {
+    return backlog.filter(c => c.sla_applied?.sla_status === 'missed');
+  }
+
+  function slaWarning(backlog) {
     const now = NOW_S();
+    return backlog.filter(c => {
+      const sla = c.sla_applied;
+      if (!sla || sla.sla_status !== 'active') return false;
+      const rem = sla.next_breach_at - now;
+      return rem > 0 && rem <= TWO_HOURS_S;
+    });
+  }
+
+  function getActiveConversations() {
     let convs;
-    if (activeFilter === F_SLA_WARNING) {
-      convs = datasets[F_BACKLOG].filter(c => {
-        const sla = c.sla_applied;
-        if (!sla || sla.sla_status !== 'active') return false;
-        const rem = sla.next_breach_at - now;
-        return rem > 0 && rem <= TWO_HOURS_S;
-      });
-    } else if (activeFilter === F_SLA_BREACHED) {
-      convs = datasets[F_BACKLOG].filter(c => c.sla_applied?.sla_status === 'missed');
-    } else {
-      convs = datasets[activeFilter] ?? datasets[F_BACKLOG];
-    }
+    if (activeFilter === F_SLA_WARNING) convs = slaWarning(datasets[F_BACKLOG]);
+    else if (activeFilter === F_SLA_BREACHED) convs = slaBreached(datasets[F_BACKLOG]);
+    else convs = datasets[activeFilter] ?? datasets[F_BACKLOG];
 
     if (urgencyFilter !== null) {
       convs = convs.filter(c => String(getUrgency(c) ?? '') === urgencyFilter);
@@ -615,6 +613,12 @@
     }
 
     return sortConvs(convs);
+  }
+
+  /** Re-render the active table + footer (+ sub-filters). Shorthand used by many handlers. */
+  function refreshActiveView() {
+    const convs = getActiveConversations();
+    renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
   }
 
   function sortConvs(convs) {
@@ -662,15 +666,11 @@
   }
 
   function getStats() {
-    const now = NOW_S(), backlog = datasets[F_BACKLOG];
+    const backlog = datasets[F_BACKLOG];
     return {
       [F_BACKLOG]: backlog.length,
-      [F_SLA_BREACHED]: backlog.filter(c => c.sla_applied?.sla_status === 'missed').length,
-      [F_SLA_WARNING]: backlog.filter(c => {
-        const sla = c.sla_applied;
-        if (!sla || sla.sla_status !== 'active') return false;
-        return (sla.next_breach_at - now) > 0 && (sla.next_breach_at - now) <= TWO_HOURS_S;
-      }).length,
+      [F_SLA_BREACHED]: slaBreached(backlog).length,
+      [F_SLA_WARNING]: slaWarning(backlog).length,
       [F_ASSIGNED_TODAY]: datasets[F_ASSIGNED_TODAY].length,
       [F_ASSIGNED_WEEK]:  datasets[F_ASSIGNED_WEEK].length,
       [F_REPLIED_TODAY]:  datasets[F_REPLIED_TODAY].length,
@@ -758,13 +758,8 @@
   }
 
   function filterLabel(key) {
-    const labels = {
-      [F_BACKLOG]: 'Backlog', [F_SLA_BREACHED]: 'SLA Breached', [F_SLA_WARNING]: 'SLA Warning',
-      [F_ASSIGNED_TODAY]: 'Assigned to Me Today', [F_ASSIGNED_WEEK]: 'Assigned to Me This Week',
-      [F_REPLIED_TODAY]: 'Replied Today', [F_REPLIED_WEEK]: 'Replied This Week',
-      [F_CLOSED_WEEK]: 'Closed This Week', [F_UNASSIGNED]: 'Unassigned', [F_UNANSWERED]: 'Unanswered',
-    };
-    return labels[key] || key;
+    const def = ALL_FILTER_CARDS.find(c => c.key === key);
+    return def?.label ?? 'Backlog';
   }
 
   // ---------------------------------------------------------------------------
@@ -1098,11 +1093,7 @@
     document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.toggle('active', c.dataset.statKey === key));
     const label = document.getElementById('sii-active-label');
     if (label) label.textContent = filterLabel(key);
-    renderCompanyFilter();
-    renderUrgencyFilter();
-    const convs = getActiveConversations();
-    renderList(convs);
-    renderFooter(convs);
+    refreshActiveView();
   }
 
   // ---------------------------------------------------------------------------
@@ -1110,20 +1101,10 @@
   // ---------------------------------------------------------------------------
 
   function getUrgencyValues() {
-    const now = NOW_S();
     let source;
-    if (activeFilter === F_SLA_WARNING) {
-      source = datasets[F_BACKLOG].filter(c => {
-        const sla = c.sla_applied;
-        if (!sla || sla.sla_status !== 'active') return false;
-        const rem = sla.next_breach_at - now;
-        return rem > 0 && rem <= TWO_HOURS_S;
-      });
-    } else if (activeFilter === F_SLA_BREACHED) {
-      source = datasets[F_BACKLOG].filter(c => c.sla_applied?.sla_status === 'missed');
-    } else {
-      source = datasets[activeFilter] ?? datasets[F_BACKLOG];
-    }
+    if (activeFilter === F_SLA_WARNING) source = slaWarning(datasets[F_BACKLOG]);
+    else if (activeFilter === F_SLA_BREACHED) source = slaBreached(datasets[F_BACKLOG]);
+    else source = datasets[activeFilter] ?? datasets[F_BACKLOG];
     const vals = new Set();
     for (const c of source) {
       const u = getUrgency(c);
@@ -1151,9 +1132,7 @@
       className: `sii-tab${urgencyFilter === null ? ' active' : ''}`,
       onClick() {
         urgencyFilter = null;
-        renderUrgencyFilter();
-        const convs = getActiveConversations();
-        renderList(convs); renderFooter(convs);
+        refreshActiveView();
       },
     }, 'All'));
 
@@ -1162,9 +1141,7 @@
         className: `sii-tab${urgencyFilter === v ? ' active' : ''}`,
         onClick() {
           urgencyFilter = v;
-          renderUrgencyFilter();
-          const convs = getActiveConversations();
-          renderList(convs); renderFooter(convs);
+          refreshActiveView();
         },
       }, v));
     }
@@ -1214,8 +1191,7 @@
       companyFilter = null;
       input.value = '';
       wrapper.classList.remove('has-value', 'open');
-      const convs = getActiveConversations();
-      renderList(convs); renderFooter(convs);
+      refreshActiveView();
     }}, '×');
 
     const listBox = el('div', { className: 'sii-combo-list' });
@@ -1254,8 +1230,7 @@
       input.value = name;
       wrapper.classList.add('has-value');
       wrapper.classList.remove('open');
-      const convs = getActiveConversations();
-      renderList(convs); renderFooter(convs);
+      refreshActiveView();
     }
 
     input.addEventListener('focus', () => {
@@ -1275,8 +1250,7 @@
       if (!input.value.trim()) {
         companyFilter = null;
         wrapper.classList.remove('has-value');
-        const convs = getActiveConversations();
-        renderList(convs); renderFooter(convs);
+        refreshActiveView();
       }
     });
 
@@ -1311,6 +1285,101 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Shared drag-list builder (used by column manager & filter manager)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build a draggable checkbox list panel.
+   * @param {Object} opts
+   * @param {Array}  opts.allDefs      - full definitions array (ALL_COLUMNS or ALL_FILTER_CARDS)
+   * @param {string} opts.idField      - key within each def ('id' or 'key')
+   * @param {Function} opts.getActive  - () => current active IDs array
+   * @param {Function} opts.setActive  - (newArr) => persist and update state
+   * @param {Function} opts.getLabel   - (def) => display label
+   * @param {Function} opts.onToggle   - called after any checkbox/drop change
+   */
+  function buildDragList({ allDefs, idField, getActive, setActive, getLabel, onToggle }) {
+    let dragSrc = null;
+    const list = el('div', { className: 'sii-col-list' });
+    const active = getActive();
+
+    function makeItem(itemId, isActive) {
+      const def = allDefs.find(d => d[idField] === itemId);
+      if (!def) return null;
+      const isRequired = !!def.required;
+      const isDraggable = isActive && !isRequired;
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = isActive;
+      if (isRequired) cb.disabled = true;
+      cb.addEventListener('change', () => {
+        const cur = getActive();
+        if (cb.checked && !cur.includes(itemId)) setActive([...cur, itemId]);
+        else if (!cb.checked) setActive(cur.filter(id => id !== itemId));
+        onToggle();
+      });
+
+      const classes = ['sii-col-item'];
+      if (isRequired) classes.push('required');
+      if (!isActive) classes.push('inactive');
+      if (isDraggable) classes.push('draggable');
+
+      const item = el('div', { className: classes.join(' ') },
+        el('span', { className: 'sii-col-drag' }, isDraggable ? '⠿' : ''),
+        cb,
+        el('span', { className: 'sii-col-label' }, getLabel(def)),
+      );
+
+      if (isDraggable) {
+        item.setAttribute('draggable', 'true');
+        item.addEventListener('dragstart', e => {
+          dragSrc = itemId;
+          e.dataTransfer.effectAllowed = 'move';
+          setTimeout(() => item.style.opacity = '0.4', 0);
+        });
+        item.addEventListener('dragend', () => {
+          dragSrc = null;
+          item.style.opacity = '';
+          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+        });
+        item.addEventListener('dragover', e => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+          if (dragSrc !== itemId) item.classList.add('sii-drag-over');
+        });
+        item.addEventListener('dragleave', () => item.classList.remove('sii-drag-over'));
+        item.addEventListener('drop', e => {
+          e.preventDefault();
+          item.classList.remove('sii-drag-over');
+          if (!dragSrc || dragSrc === itemId) return;
+          const cur = [...getActive()];
+          const from = cur.indexOf(dragSrc);
+          const to   = cur.indexOf(itemId);
+          if (from < 0 || to < 0) return;
+          cur.splice(from, 1);
+          cur.splice(to, 0, dragSrc);
+          setActive(cur);
+          onToggle();
+        });
+      }
+      return item;
+    }
+
+    for (const id of active) {
+      const item = makeItem(id, true);
+      if (item) list.append(item);
+    }
+    for (const def of allDefs) {
+      if (active.includes(def[idField]) || def.required) continue;
+      const item = makeItem(def[idField], false);
+      if (item) list.append(item);
+    }
+    return list;
+  }
+
+  // ---------------------------------------------------------------------------
   // Column manager
   // ---------------------------------------------------------------------------
 
@@ -1324,101 +1393,19 @@
     document.getElementById('sii-col-panel')?.remove();
     if (!colMgrVisible) return;
 
-    let dragSrcId = null;
-    const list = el('div', { className: 'sii-col-list' });
-
-    function makeItem(colId, isActive) {
-      const col = ALL_COLUMNS.find(c => c.id === colId);
-      if (!col) return null;
-      const isRequired = col.required;
-      const isDraggable = isActive && !isRequired;
-
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = isActive;
-      if (isRequired) cb.disabled = true;
-      cb.addEventListener('change', () => {
-        if (cb.checked && !activeColumns.includes(colId)) {
-          activeColumns = [...activeColumns, colId];
-        } else if (!cb.checked) {
-          activeColumns = activeColumns.filter(id => id !== colId);
-        }
-        saveColumnPrefs(activeColumns);
-        renderColMgr();
-        renderList(getActiveConversations());
-      });
-
-      const classes = ['sii-col-item'];
-      if (isRequired) classes.push('required');
-      if (!isActive) classes.push('inactive');
-      if (isDraggable) classes.push('draggable');
-
-      const item = el('div', {
-        className: classes.join(' '),
-        'data-col-id': colId,
-      },
-        el('span', { className: 'sii-col-drag' }, isDraggable ? '⠿' : ''),
-        cb,
-        el('span', { className: 'sii-col-label' }, col.label || colId),
-      );
-
-      if (isDraggable) {
-        item.setAttribute('draggable', 'true');
-        item.addEventListener('dragstart', e => {
-          dragSrcId = colId;
-          e.dataTransfer.effectAllowed = 'move';
-          setTimeout(() => item.style.opacity = '0.4', 0);
-        });
-        item.addEventListener('dragend', () => {
-          dragSrcId = null;
-          item.style.opacity = '';
-          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
-        });
-        item.addEventListener('dragover', e => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
-          if (dragSrcId !== colId) item.classList.add('sii-drag-over');
-        });
-        item.addEventListener('dragleave', () => item.classList.remove('sii-drag-over'));
-        item.addEventListener('drop', e => {
-          e.preventDefault();
-          item.classList.remove('sii-drag-over');
-          if (!dragSrcId || dragSrcId === colId) return;
-          const newCols = [...activeColumns];
-          const from = newCols.indexOf(dragSrcId);
-          const to   = newCols.indexOf(colId);
-          if (from < 0 || to < 0) return;
-          newCols.splice(from, 1);
-          newCols.splice(to, 0, dragSrcId);
-          activeColumns = newCols;
-          saveColumnPrefs(activeColumns);
-          renderColMgr();
-          renderList(getActiveConversations());
-        });
-      }
-
-      return item;
-    }
-
-    // Active columns in current order
-    for (const colId of activeColumns) {
-      const item = makeItem(colId, true);
-      if (item) list.append(item);
-    }
-
-    // Inactive (unchecked) columns
-    for (const col of ALL_COLUMNS) {
-      if (activeColumns.includes(col.id) || col.required) continue;
-      const item = makeItem(col.id, false);
-      if (item) list.append(item);
-    }
+    const list = buildDragList({
+      allDefs: ALL_COLUMNS,
+      idField: 'id',
+      getActive: () => activeColumns,
+      setActive: v => { activeColumns = v; saveColumnPrefs(v); },
+      getLabel: def => def.label || def.id,
+      onToggle: () => { renderColMgr(); refreshActiveView(); },
+    });
 
     const panel = el('div', { id: 'sii-col-panel' },
       el('span', { className: 'sii-col-panel-label' }, 'Drag to reorder'),
       list,
     );
-
     const controls = document.getElementById('sii-controls');
     if (controls) controls.after(panel);
   }
@@ -1437,102 +1424,30 @@
     document.getElementById('sii-filter-panel')?.remove();
     if (!filterMgrVisible) return;
 
-    let dragSrcKey = null;
-    const list = el('div', { className: 'sii-col-list' });
+    const first = currentAdminName ? currentAdminName.split(' ')[0] : null;
 
-    function makeItem(key, isActive) {
-      const def = ALL_FILTER_CARDS.find(c => c.key === key);
-      if (!def) return null;
-      const isRequired = def.required;
-      const isDraggable = isActive && !isRequired;
-      const first = currentAdminName ? currentAdminName.split(' ')[0] : null;
-      const label = (def.key === F_BACKLOG && first) ? `${first}'s Backlog` : (def.label ?? 'Backlog');
-
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = isActive;
-      if (isRequired) cb.disabled = true;
-      cb.addEventListener('change', () => {
-        if (cb.checked && !activeFilterCards.includes(key)) {
-          activeFilterCards = [...activeFilterCards, key];
-        } else if (!cb.checked) {
-          activeFilterCards = activeFilterCards.filter(k => k !== key);
-          if (activeFilter === key) {
-            activeFilter = F_BACKLOG;
-            document.getElementById('sii-active-label')?.textContent !== undefined &&
-              (document.getElementById('sii-active-label').textContent = filterLabel(F_BACKLOG));
-          }
+    const list = buildDragList({
+      allDefs: ALL_FILTER_CARDS,
+      idField: 'key',
+      getActive: () => activeFilterCards,
+      setActive: v => {
+        activeFilterCards = v;
+        saveFilterPrefs(v);
+        // If the active filter was just hidden, fall back to backlog
+        if (!v.includes(activeFilter)) {
+          activeFilter = F_BACKLOG;
+          const lbl = document.getElementById('sii-active-label');
+          if (lbl) lbl.textContent = filterLabel(F_BACKLOG);
         }
-        saveFilterPrefs(activeFilterCards);
-        renderFilterMgr();
-        renderStats(getStats());
-      });
-
-      const classes = ['sii-col-item'];
-      if (isRequired) classes.push('required');
-      if (!isActive) classes.push('inactive');
-      if (isDraggable) classes.push('draggable');
-
-      const item = el('div', { className: classes.join(' '), 'data-filter-key': key },
-        el('span', { className: 'sii-col-drag' }, isDraggable ? '⠿' : ''),
-        cb,
-        el('span', { className: 'sii-col-label' }, label),
-      );
-
-      if (isDraggable) {
-        item.setAttribute('draggable', 'true');
-        item.addEventListener('dragstart', e => {
-          dragSrcKey = key;
-          e.dataTransfer.effectAllowed = 'move';
-          setTimeout(() => item.style.opacity = '0.4', 0);
-        });
-        item.addEventListener('dragend', () => {
-          dragSrcKey = null;
-          item.style.opacity = '';
-          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
-        });
-        item.addEventListener('dragover', e => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
-          if (dragSrcKey !== key) item.classList.add('sii-drag-over');
-        });
-        item.addEventListener('dragleave', () => item.classList.remove('sii-drag-over'));
-        item.addEventListener('drop', e => {
-          e.preventDefault();
-          item.classList.remove('sii-drag-over');
-          if (!dragSrcKey || dragSrcKey === key) return;
-          const newKeys = [...activeFilterCards];
-          const from = newKeys.indexOf(dragSrcKey);
-          const to   = newKeys.indexOf(key);
-          if (from < 0 || to < 0) return;
-          newKeys.splice(from, 1);
-          newKeys.splice(to, 0, dragSrcKey);
-          activeFilterCards = newKeys;
-          saveFilterPrefs(activeFilterCards);
-          renderFilterMgr();
-          renderStats(getStats());
-        });
-      }
-
-      return item;
-    }
-
-    for (const key of activeFilterCards) {
-      const item = makeItem(key, true);
-      if (item) list.append(item);
-    }
-    for (const def of ALL_FILTER_CARDS) {
-      if (activeFilterCards.includes(def.key) || def.required) continue;
-      const item = makeItem(def.key, false);
-      if (item) list.append(item);
-    }
+      },
+      getLabel: def => (def.key === F_BACKLOG && first) ? `${first}'s Backlog` : (def.label ?? 'Backlog'),
+      onToggle: () => { renderFilterMgr(); renderStats(getStats()); },
+    });
 
     const panel = el('div', { id: 'sii-filter-panel', className: 'sii-col-panel' },
       el('span', { className: 'sii-col-panel-label' }, 'Drag to reorder'),
       list,
     );
-
     const stats = document.getElementById('sii-stats');
     if (stats) stats.before(panel);
   }
@@ -1609,8 +1524,7 @@
             e.stopPropagation();
             dismissedIds.add(String(conv.id));
             saveDismissed();
-            const convs = getActiveConversations();
-            renderList(convs); renderFooter(convs);
+            refreshActiveView();
           },
         }, '✓ Done'));
       } else {
@@ -1620,8 +1534,7 @@
             e.stopPropagation();
             dismissedIds.delete(String(conv.id));
             saveDismissed();
-            const convs = getActiveConversations();
-            renderList(convs); renderFooter(convs);
+            refreshActiveView();
           },
         }, '↩ Restore'));
       }
@@ -1635,11 +1548,10 @@
   }
 
   function buildTableHeader(canDismiss) {
-    const labels = {
-      id: '#', subject: 'Subject / Preview', sla: 'SLA',
-      urgency: 'Urgency', priority: 'Priority', responses: 'Responses', company: 'Company', team: 'Team', created: 'Created', updated: 'Updated',
-    };
-    const ths = activeColumns.map(id => `<th>${labels[id] ?? id}</th>`).join('');
+    const ths = activeColumns.map(id => {
+      const col = ALL_COLUMNS.find(c => c.id === id);
+      return `<th>${col?.label ?? id}</th>`;
+    }).join('');
     return `<tr>${ths}${canDismiss ? '<th></th>' : ''}</tr>`;
   }
 
@@ -1840,8 +1752,7 @@
         const { key, dir } = parseSortMode();
         sortMode = cat.key === key ? `${cat.key}_${dir === 'asc' ? 'desc' : 'asc'}` : `${cat.key}_${cat.defaultDir}`;
         refreshSortButtons();
-        const convs = getActiveConversations();
-        renderList(convs); renderFooter(convs);
+        refreshActiveView();
       }});
       btn.dataset.sortCat = cat.key;
       group.append(btn);
@@ -1950,19 +1861,14 @@
         // SLA filters are derived from backlog, so also re-render when backlog lands
         const activeReady = readyKeys.includes(activeFilter)
           || (readyKeys.includes(F_BACKLOG) && (activeFilter === F_SLA_BREACHED || activeFilter === F_SLA_WARNING));
-        if (activeReady) {
-          const convs = getActiveConversations();
-          renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
-        }
+        if (activeReady) refreshActiveView();
       });
 
       lastLoadedAt = NOW_S();
-      isLoading = false;
       updateButtonStatus('st-fresh');
-      const stats = getStats(), convs = getActiveConversations();
-      renderStats(stats); renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
+      renderStats(getStats());
+      refreshActiveView();
     } catch (err) {
-      isLoading = false;
       updateButtonStatus('st-error');
       const body = document.getElementById('sii-body');
       if (body) { body.innerHTML = ''; body.append(el('div', { id: 'sii-empty' }, `⚠️ ${err.message}. Try refreshing or check your token in ⚙ Settings.`)); }
@@ -2003,8 +1909,8 @@
         isLoading = false;
         updateButtonStatus('st-fresh');
         if (document.getElementById('sii-overlay') && !settingsVisible) {
-          const stats = getStats(), convs = getActiveConversations();
-          renderStats(stats); renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
+          renderStats(getStats());
+          refreshActiveView();
         }
       } catch (_) {
         isLoading = false;
