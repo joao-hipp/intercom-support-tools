@@ -662,6 +662,19 @@
   // Active conversations & stats
   // ---------------------------------------------------------------------------
 
+  /** Last meaningful conversation event (reply, assignment, close), falls back to updated_at. */
+  function lastActivity(conv) {
+    const s = conv.statistics;
+    if (!s) return conv.updated_at || 0;
+    const t = Math.max(
+      s.last_contact_reply_at || 0,
+      s.last_admin_reply_at || 0,
+      s.last_assignment_at || 0,
+      s.last_close_at || 0,
+    );
+    return t || conv.updated_at || 0;
+  }
+
   function slaBreached(backlog) {
     return backlog.filter(c => c.sla_applied?.sla_status === 'missed');
   }
@@ -715,8 +728,8 @@
     return convs.slice().sort((a, b) => {
       if (sortMode === 'created_asc')  return a.created_at - b.created_at;
       if (sortMode === 'created_desc') return b.created_at - a.created_at;
-      if (sortMode === 'updated_asc')  return (a.updated_at ?? 0) - (b.updated_at ?? 0);
-      if (sortMode === 'updated_desc') return (b.updated_at ?? 0) - (a.updated_at ?? 0);
+      if (sortMode === 'updated_asc')  return lastActivity(a) - lastActivity(b);
+      if (sortMode === 'updated_desc') return lastActivity(b) - lastActivity(a);
 
       if (sortMode === 'responses_asc' || sortMode === 'responses_desc') {
         const ra = convResponsesMap[String(a.id)] ?? -1;
@@ -1746,7 +1759,7 @@
           cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.created_at))));
           break;
         case 'updated':
-          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.updated_at))));
+          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(lastActivity(conv)))));
           break;
       }
     }
