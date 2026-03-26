@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.7.1
+// @version      2.8.0
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -146,6 +146,7 @@
   let activeFilterCards = loadFilterPrefs();
   let filterMgrVisible = false;
   let isLoading     = false;
+  let pendingAdminSwitch = false;
   let lastLoadedAt  = 0;
   let debugMode     = false;
 
@@ -246,6 +247,14 @@
   let companiesMap = null;  // id → name, loaded once
   let convCompanyMap = {};   // conv_id → company name
   let convResponsesMap = {}; // conv_id → number of admin replies
+  let cachedAdmins = null;   // array of admin objects, loaded once
+
+  async function ensureAdminsCache() {
+    if (cachedAdmins) return cachedAdmins;
+    const resp = await apiRequest({ path: '/admins' });
+    cachedAdmins = (resp.admins ?? resp.data ?? []).filter(a => a.type === 'admin');
+    return cachedAdmins;
+  }
 
   async function ensureTeamsMap() {
     if (teamsMap) return;
@@ -407,8 +416,7 @@
       // If we got the ID but not the name, resolve it from the admins list
       if (!currentAdminName) {
         try {
-          const resp = await apiRequest({ path: '/admins' });
-          const admins = resp.admins ?? resp.data ?? [];
+          const admins = await ensureAdminsCache();
           const me = admins.find(a => String(a.id) === currentAdminId);
           if (me) {
             currentAdminName = me.name || me.email || 'You';
@@ -420,8 +428,7 @@
     }
     // Fallback: fetch admins list and match by looking at who's logged in
     // This covers edge cases where the Ember session key format changes
-    const resp = await apiRequest({ path: '/admins' });
-    const admins = (resp.admins ?? resp.data ?? []).filter(a => a.type === 'admin');
+    const admins = await ensureAdminsCache();
     if (admins.length === 0) throw new Error('No admins found. Check your API token permissions.');
     // If only one admin, use them
     if (admins.length === 1) {
@@ -434,22 +441,94 @@
         currentAdminId   = String(match.id);
         currentAdminName = match.name || match.email || 'You';
       } else {
-        // Last resort: use the first non-bot admin
-        const first = admins[0];
-        currentAdminId   = String(first.id);
-        currentAdminName = first.name || first.email || 'You';
-        console.warn('[SII] Could not detect current admin — defaulting to:', currentAdminName);
+        // Could not auto-detect — ask the user to pick themselves
+        const picked = await promptAdminPicker(admins);
+        currentAdminId   = String(picked.id);
+        currentAdminName = picked.name || picked.email || 'You';
       }
     }
     localStorage.setItem(STORAGE_ADMIN_ID,   currentAdminId);
     localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
   }
 
+  function promptAdminPicker(admins) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      Object.assign(overlay.style, {
+        position: 'fixed', inset: '0', zIndex: '2147483647',
+        background: 'rgba(0,0,0,0.5)', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        fontFamily: 'system-ui, sans-serif',
+      });
+      const box = document.createElement('div');
+      Object.assign(box.style, {
+        background: '#fff', borderRadius: '12px', padding: '24px',
+        maxWidth: '380px', width: '90%',
+        boxShadow: '0 8px 30px rgba(0,0,0,0.25)',
+      });
+
+      const title = document.createElement('div');
+      Object.assign(title.style, { fontSize: '15px', fontWeight: '600', color: '#1a1a1a', marginBottom: '4px' });
+      title.textContent = 'Support Interface';
+
+      const desc = document.createElement('div');
+      Object.assign(desc.style, { fontSize: '13px', color: '#555', marginBottom: '12px' });
+      desc.textContent = 'Could not detect your identity automatically. Please select yourself:';
+
+      const search = document.createElement('input');
+      search.type = 'text';
+      search.placeholder = 'Search by name or email…';
+      Object.assign(search.style, {
+        width: '100%', padding: '8px 10px', fontSize: '13px',
+        border: '1px solid #ccc', borderRadius: '6px', marginBottom: '10px',
+        boxSizing: 'border-box', outline: 'none',
+      });
+      search.onfocus = () => search.style.borderColor = '#1f73b7';
+      search.onblur  = () => search.style.borderColor = '#ccc';
+
+      const list = document.createElement('div');
+      Object.assign(list.style, {
+        display: 'flex', flexDirection: 'column', gap: '4px',
+        maxHeight: '320px', overflowY: 'auto',
+      });
+
+      const buttons = [];
+      for (const admin of admins) {
+        const label = admin.name || admin.email || `Admin ${admin.id}`;
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.dataset.search = `${(admin.name || '')} ${(admin.email || '')}`.toLowerCase();
+        Object.assign(btn.style, {
+          padding: '10px 14px', border: '1px solid #d0d0d0', borderRadius: '8px',
+          background: '#fafafa', cursor: 'pointer', fontSize: '13px', color: '#333',
+          textAlign: 'left', transition: 'background 0.15s, border-color 0.15s',
+        });
+        btn.onmouseenter = () => { btn.style.background = '#edf4fb'; btn.style.borderColor = '#1f73b7'; };
+        btn.onmouseleave = () => { btn.style.background = '#fafafa'; btn.style.borderColor = '#d0d0d0'; };
+        btn.onclick = () => { overlay.remove(); resolve(admin); };
+        list.appendChild(btn);
+        buttons.push(btn);
+      }
+
+      search.addEventListener('input', () => {
+        const q = search.value.toLowerCase().trim();
+        for (const btn of buttons) {
+          btn.style.display = (!q || btn.dataset.search.includes(q)) ? '' : 'none';
+        }
+      });
+
+      box.append(title, desc, search, list);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      search.focus();
+    });
+  }
+
   function tryMatchAdminFromPage(admins) {
     // Try to find the admin's email/name from Intercom's page context
     try {
-      const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
       // Intercom sometimes exposes the current admin on the app object
+      const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
       const appAdmin = win.Intercom?.booted_data?.admin
         || win.__INTERCOM_ADMIN__
         || null;
@@ -837,13 +916,27 @@
     #sii-header {
       display: flex; align-items: center; justify-content: space-between;
       padding: 15px 22px; border-bottom: 1px solid #e8eaed; flex-shrink: 0;
+      overflow: visible;
     }
     .sii-title { display: flex; align-items: center; gap: 10px; }
     .sii-title h2 { margin: 0; font-size: 15px; font-weight: 700; color: #1a1a1a; }
-    .sii-admin-chip {
-      background: #edf4fb; color: #1f73b7; border-radius: 99px;
-      padding: 2px 9px; font-size: 11px; font-weight: 600;
+    .sii-admin-chip { position: relative; }
+    .sii-admin-switcher { position: relative; min-width: 140px; }
+    .sii-admin-switcher .sii-combo-input {
+      background: #edf4fb; color: #1f73b7; font-weight: 600;
+      font-size: 11px; border: 1px solid transparent; border-radius: 99px;
+      padding: 3px 20px 3px 10px; cursor: pointer; width: auto; min-width: 120px;
     }
+    .sii-admin-arrow {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      color: #1f73b7; font-size: 10px; pointer-events: none; line-height: 1;
+    }
+    .sii-admin-switcher.open .sii-admin-arrow { display: none; }
+    .sii-admin-switcher .sii-combo-input:focus {
+      border-color: #1f73b7; border-radius: 5px 5px 0 0;
+      background: #fff; color: #333;
+    }
+    .sii-admin-switcher .sii-combo-list { min-width: 220px; }
     .sii-header-right { display: flex; align-items: center; gap: 6px; }
     .sii-icon-btn {
       background: none; border: 1px solid #e0e0e0; border-radius: 6px;
@@ -1057,11 +1150,10 @@
     const container = document.getElementById('sii-stats');
     if (!container) return;
     container.innerHTML = '';
-    const first = currentAdminName ? currentAdminName.split(' ')[0] : null;
     for (const key of activeFilterCards) {
       const def = ALL_FILTER_CARDS.find(c => c.key === key);
       if (!def) continue;
-      const label = (def.key === F_BACKLOG && first) ? `${first}'s Backlog` : (def.label ?? 'Backlog');
+      const label = def.label ?? 'Backlog';
       const isActive = activeFilter === key;
       const card = el('div', {
         className: `sii-stat-card ${def.cls}${isActive ? ' active' : ''}${loading ? ' sii-loading' : ''}`,
@@ -1285,6 +1377,148 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Admin switcher (searchable dropdown in header)
+  // ---------------------------------------------------------------------------
+
+  function renderAdminSwitcher() {
+    const container = document.getElementById('sii-admin-chip');
+    if (!container) return;
+    container.innerHTML = '';
+
+    // If no cached admins yet, show static text
+    if (!cachedAdmins || !cachedAdmins.length) {
+      container.textContent = currentAdminName ? `👤 ${currentAdminName}` : '…';
+      return;
+    }
+
+    const admins = cachedAdmins;
+    let highlightIdx = -1;
+
+    const wrapper = el('div', { className: 'sii-combo sii-admin-switcher has-value' });
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'sii-combo-input';
+    input.placeholder = 'Switch admin…';
+    input.value = currentAdminName ? `👤 ${currentAdminName}` : '';
+    input.readOnly = false;
+
+    const listBox = el('div', { className: 'sii-combo-list' });
+
+    function buildOptions(filter) {
+      listBox.innerHTML = '';
+      highlightIdx = -1;
+      const q = (filter || '').toLowerCase();
+      const filtered = q
+        ? admins.filter(a => ((a.name || '') + ' ' + (a.email || '')).toLowerCase().includes(q))
+        : admins;
+      if (!filtered.length) {
+        listBox.append(el('div', { className: 'sii-combo-empty' }, 'No matches'));
+        return;
+      }
+      for (let i = 0; i < filtered.length; i++) {
+        const admin = filtered[i];
+        const label = admin.name || admin.email || `Admin ${admin.id}`;
+        const isActive = String(admin.id) === currentAdminId;
+        const opt = el('div', {
+          className: `sii-combo-opt${isActive ? ' active' : ''}`,
+          'data-idx': i,
+          onMousedown(e) {
+            e.preventDefault();
+            selectAdmin(admin);
+          },
+          onMouseenter() {
+            listBox.querySelectorAll('.highlighted').forEach(o => o.classList.remove('highlighted'));
+            opt.classList.add('highlighted');
+            highlightIdx = i;
+          },
+        }, label);
+        listBox.append(opt);
+      }
+    }
+
+    function selectAdmin(admin) {
+      const newId = String(admin.id);
+      const newName = admin.name || admin.email || 'You';
+      wrapper.classList.remove('open');
+      input.value = `👤 ${newName}`;
+      input.blur();
+
+      if (newId === currentAdminId) return; // no change
+
+      currentAdminId   = newId;
+      currentAdminName = newName;
+      localStorage.setItem(STORAGE_ADMIN_ID,   currentAdminId);
+      localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
+
+      // Clear stale data from previous admin
+      for (const key of Object.keys(datasets)) datasets[key] = [];
+      convCompanyMap = {};
+      convResponsesMap = {};
+      lastLoadedAt = 0;
+
+      if (isLoading) {
+        pendingAdminSwitch = true;
+      } else {
+        handleRefresh();
+      }
+    }
+
+    input.addEventListener('focus', () => {
+      // Clear the display value so user can type to search
+      input.value = '';
+      buildOptions('');
+      wrapper.classList.add('open');
+    });
+
+    input.addEventListener('blur', () => {
+      setTimeout(() => {
+        wrapper.classList.remove('open');
+        // Restore display value
+        input.value = currentAdminName ? `👤 ${currentAdminName}` : '';
+      }, 150);
+    });
+
+    input.addEventListener('input', () => {
+      buildOptions(input.value);
+      if (!wrapper.classList.contains('open')) wrapper.classList.add('open');
+    });
+
+    input.addEventListener('keydown', (e) => {
+      const opts = listBox.querySelectorAll('.sii-combo-opt');
+      if (!opts.length) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        highlightIdx = Math.min(highlightIdx + 1, opts.length - 1);
+        opts.forEach(o => o.classList.remove('highlighted'));
+        opts[highlightIdx]?.classList.add('highlighted');
+        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        highlightIdx = Math.max(highlightIdx - 1, 0);
+        opts.forEach(o => o.classList.remove('highlighted'));
+        opts[highlightIdx]?.classList.add('highlighted');
+        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (highlightIdx >= 0 && opts[highlightIdx]) {
+          const q = (input.value || '').toLowerCase();
+          const filtered = q
+            ? admins.filter(a => ((a.name || '') + ' ' + (a.email || '')).toLowerCase().includes(q))
+            : admins;
+          if (filtered[highlightIdx]) selectAdmin(filtered[highlightIdx]);
+        }
+      } else if (e.key === 'Escape') {
+        wrapper.classList.remove('open');
+        input.blur();
+      }
+    });
+
+    const arrow = el('span', { className: 'sii-admin-arrow' }, '▾');
+    wrapper.append(input, arrow, listBox);
+    container.appendChild(wrapper);
+  }
+
+  // ---------------------------------------------------------------------------
   // Shared drag-list builder (used by column manager & filter manager)
   // ---------------------------------------------------------------------------
 
@@ -1424,8 +1658,6 @@
     document.getElementById('sii-filter-panel')?.remove();
     if (!filterMgrVisible) return;
 
-    const first = currentAdminName ? currentAdminName.split(' ')[0] : null;
-
     const list = buildDragList({
       allDefs: ALL_FILTER_CARDS,
       idField: 'key',
@@ -1440,7 +1672,7 @@
           if (lbl) lbl.textContent = filterLabel(F_BACKLOG);
         }
       },
-      getLabel: def => (def.key === F_BACKLOG && first) ? `${first}'s Backlog` : (def.label ?? 'Backlog'),
+      getLabel: def => def.label ?? 'Backlog',
       onToggle: () => { renderFilterMgr(); renderStats(getStats()); },
     });
 
@@ -1701,7 +1933,7 @@
       el('div', { id: 'sii-header' },
         el('div', { className: 'sii-title' },
           el('h2', {}, '🎧 Queue Health'),
-          el('span', { className: 'sii-admin-chip', id: 'sii-admin-chip' },
+          el('div', { className: 'sii-admin-chip', id: 'sii-admin-chip' },
             currentAdminName ? `👤 ${currentAdminName}` : '…'),
         ),
         el('div', { className: 'sii-header-right' },
@@ -1784,6 +2016,9 @@
     const hasCached = lastLoadedAt > 0;
     const isFresh = hasCached && (NOW_S() - lastLoadedAt < getStaleSecs());
 
+    // Load admins list for the switcher (non-blocking)
+    ensureAdminsCache().then(() => renderAdminSwitcher()).catch(() => {});
+
     if (hasCached) {
       // Show cached data immediately
       renderStats(getStats(), !isFresh);
@@ -1850,8 +2085,8 @@
 
     try {
       await ensureAdminInfo();
-      const chip = document.getElementById('sii-admin-chip');
-      if (chip && currentAdminName) chip.textContent = `👤 ${currentAdminName}`;
+      await ensureAdminsCache();
+      renderAdminSwitcher();
 
       await loadAllDatasets((readyKeys) => {
         // Progressive update: as each search query resolves, stop its card spinner and show the count
@@ -1875,6 +2110,10 @@
     } finally {
       isLoading = false;
       document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.remove('sii-loading'));
+      if (pendingAdminSwitch) {
+        pendingAdminSwitch = false;
+        handleRefresh();
+      }
     }
   }
 

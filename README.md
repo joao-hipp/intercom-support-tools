@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.7.1-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.8.0-blue)
 
 ## Install
 
@@ -43,7 +43,7 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
 - **Sorting** — sort by SLA urgency, created date, or last updated
 - **Configurable refresh** — set how often the dashboard fetches fresh data (default: 30 minutes)
 - **Status indicator** — the floating button's dot changes colour to reflect the current state: red (no token), pulsing blue (loading), green (data fresh), amber (data stale), flashing red (error)
-- **Automatic admin detection** — detects your identity from Intercom's session data; no manual selection needed
+- **Admin switcher** — searchable dropdown to view any teammate's queue; auto-detects your identity on load, with a fallback picker for ViolentMonkey and Orion Browser
 - **Progressive loading** — stat cards update individually as each data group resolves; no more waiting for all queries to finish
 - **Data caching** — conversation data is cached in localStorage so the dashboard opens instantly with cached data while a background refresh runs
 
@@ -70,6 +70,15 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.8.0
+- **Admin switcher** — searchable dropdown in the header to view any teammate's queue
+- **Cross-browser admin picker** — when auto-detection fails (ViolentMonkey/Orion), a modal prompts the user instead of silently defaulting to the wrong admin
+- **Static Backlog label** — stat card now says "Backlog" instead of "{Name}'s Backlog", no longer re-renders on admin switch
+- **Admins cache** — `ensureAdminsCache()` avoids redundant `/admins` API calls
+- **Pending admin switch** — queues refresh if user switches admin mid-load
+- **Switcher renders on open** — admins list fetched eagerly so the switcher is interactive immediately
+- **Dropdown arrow indicator** — ▾ chevron on admin chip for discoverability
 
 ### v2.7.1
 - **Code cleanup** — extracted shared helpers (`refreshActiveView`, `slaBreached`/`slaWarning`, `buildDragList`), removed ~94 lines of duplicated logic across SLA filters, column/filter managers, and render calls
