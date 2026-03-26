@@ -7,7 +7,6 @@
 // @match        https://app.intercom.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      api.intercom.io
-
 // @updateURL    https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js
 // @downloadURL  https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js
 // ==/UserScript==
