@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.8.0-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.8.1-blue)
 
 ## Install
 
@@ -70,6 +70,12 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.8.1
+- **Smoother admin switching** — switching mid-load now discards stale data instantly via a load-generation counter; no more flash of the previous admin's stats
+- **Fewer redundant re-renders** — company and urgency filter UIs only rebuild when available options actually change
+- **Deduplicated API calls** — admins list is fetched once on modal open instead of twice
+- **Arrow indicator inline** — the ▾ chevron now sits inside the admin chip text for consistent placement
 
 ### v2.8.0
 - **Admin switcher** — searchable dropdown in the header to view any teammate's queue

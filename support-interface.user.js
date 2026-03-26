@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.8.0
+// @version      2.8.1
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -145,7 +145,7 @@
   let activeFilterCards = loadFilterPrefs();
   let filterMgrVisible = false;
   let isLoading     = false;
-  let pendingAdminSwitch = false;
+  let loadGeneration = 0;
   let lastLoadedAt  = 0;
   let debugMode     = false;
 
@@ -693,10 +693,21 @@
     return sortConvs(convs);
   }
 
+  let _lastCompanyKeys = '';
+  let _lastUrgencyKeys = '';
+
   /** Re-render the active table + footer (+ sub-filters). Shorthand used by many handlers. */
   function refreshActiveView() {
     const convs = getActiveConversations();
-    renderList(convs); renderFooter(convs); renderCompanyFilter(); renderUrgencyFilter();
+    renderList(convs);
+    renderFooter(convs);
+
+    // Only rebuild filter UIs when available options actually change
+    const companyKeys = getCompanyValues(convs).join('\0');
+    if (companyKeys !== _lastCompanyKeys) { _lastCompanyKeys = companyKeys; renderCompanyFilter(); }
+
+    const urgencyKeys = [...new Set(convs.map(c => getUrgency(c) ?? ''))].sort().join('\0');
+    if (urgencyKeys !== _lastUrgencyKeys) { _lastUrgencyKeys = urgencyKeys; renderUrgencyFilter(); }
   }
 
   function sortConvs(convs) {
@@ -924,13 +935,8 @@
     .sii-admin-switcher .sii-combo-input {
       background: #edf4fb; color: #1f73b7; font-weight: 600;
       font-size: 11px; border: 1px solid transparent; border-radius: 99px;
-      padding: 3px 20px 3px 10px; cursor: pointer; width: auto; min-width: 120px;
+      padding: 3px 10px; cursor: pointer; width: auto; min-width: 120px;
     }
-    .sii-admin-arrow {
-      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-      color: #1f73b7; font-size: 10px; pointer-events: none; line-height: 1;
-    }
-    .sii-admin-switcher.open .sii-admin-arrow { display: none; }
     .sii-admin-switcher .sii-combo-input:focus {
       border-color: #1f73b7; border-radius: 5px 5px 0 0;
       background: #fff; color: #333;
@@ -1244,9 +1250,9 @@
   // Company filter (searchable dropdown / combobox)
   // ---------------------------------------------------------------------------
 
-  function getCompanyValues() {
-    // Collect unique company names from current conversations
-    const convs = getActiveConversations();
+  function getCompanyValues(convs) {
+    // Collect unique company names from provided or current conversations
+    if (!convs) convs = getActiveConversations();
     const names = new Set();
     for (const c of convs) {
       const name = convCompanyMap[String(c.id)];
@@ -1386,7 +1392,7 @@
 
     // If no cached admins yet, show static text
     if (!cachedAdmins || !cachedAdmins.length) {
-      container.textContent = currentAdminName ? `👤 ${currentAdminName}` : '…';
+      container.textContent = currentAdminName ? `👤 ${currentAdminName} ▾` : '…';
       return;
     }
 
@@ -1398,7 +1404,7 @@
     input.type = 'text';
     input.className = 'sii-combo-input';
     input.placeholder = 'Switch admin…';
-    input.value = currentAdminName ? `👤 ${currentAdminName}` : '';
+    input.value = currentAdminName ? `👤 ${currentAdminName} ▾` : '';
     input.readOnly = false;
 
     const listBox = el('div', { className: 'sii-combo-list' });
@@ -1439,7 +1445,7 @@
       const newId = String(admin.id);
       const newName = admin.name || admin.email || 'You';
       wrapper.classList.remove('open');
-      input.value = `👤 ${newName}`;
+      input.value = `👤 ${newName} ▾`;
       input.blur();
 
       if (newId === currentAdminId) return; // no change
@@ -1449,17 +1455,17 @@
       localStorage.setItem(STORAGE_ADMIN_ID,   currentAdminId);
       localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
 
-      // Clear stale data from previous admin
+      // Invalidate any in-flight load and clear stale data
+      loadGeneration++;
+      isLoading = false;
       for (const key of Object.keys(datasets)) datasets[key] = [];
       convCompanyMap = {};
       convResponsesMap = {};
       lastLoadedAt = 0;
+      _lastCompanyKeys = '';
+      _lastUrgencyKeys = '';
 
-      if (isLoading) {
-        pendingAdminSwitch = true;
-      } else {
-        handleRefresh();
-      }
+      handleRefresh();
     }
 
     input.addEventListener('focus', () => {
@@ -1473,7 +1479,7 @@
       setTimeout(() => {
         wrapper.classList.remove('open');
         // Restore display value
-        input.value = currentAdminName ? `👤 ${currentAdminName}` : '';
+        input.value = currentAdminName ? `👤 ${currentAdminName} ▾` : '';
       }, 150);
     });
 
@@ -1512,8 +1518,7 @@
       }
     });
 
-    const arrow = el('span', { className: 'sii-admin-arrow' }, '▾');
-    wrapper.append(input, arrow, listBox);
+    wrapper.append(input, listBox);
     container.appendChild(wrapper);
   }
 
@@ -1933,7 +1938,7 @@
         el('div', { className: 'sii-title' },
           el('h2', {}, '🎧 Queue Health'),
           el('div', { className: 'sii-admin-chip', id: 'sii-admin-chip' },
-            currentAdminName ? `👤 ${currentAdminName}` : '…'),
+            currentAdminName ? `👤 ${currentAdminName} ▾` : '…'),
         ),
         el('div', { className: 'sii-header-right' },
           el('button', { className: 'sii-icon-btn', onClick: handleRefresh }, '↻ Refresh'),
@@ -2069,6 +2074,7 @@
     if (isLoading) return;
     if (!getToken()) { updateButtonStatus('st-none'); renderList([]); return; }
 
+    const gen = ++loadGeneration;
     isLoading = true;
     updateButtonStatus('st-loading');
     const hasCachedData = lastLoadedAt > 0;
@@ -2084,10 +2090,13 @@
 
     try {
       await ensureAdminInfo();
-      await ensureAdminsCache();
-      renderAdminSwitcher();
+      if (gen !== loadGeneration) return; // admin switched, abandon this load
+      // Admins cache + switcher rendering is handled by openModal() non-blocking;
+      // only render here if cache already loaded (avoids duplicate API call)
+      if (cachedAdmins) renderAdminSwitcher();
 
       await loadAllDatasets((readyKeys) => {
+        if (gen !== loadGeneration) return; // stale — discard progressive updates
         // Progressive update: as each search query resolves, stop its card spinner and show the count
         const stats = getStats();
         updateStatCards(readyKeys, stats);
@@ -2098,20 +2107,20 @@
         if (activeReady) refreshActiveView();
       });
 
+      if (gen !== loadGeneration) return; // admin switched during load
       lastLoadedAt = NOW_S();
       updateButtonStatus('st-fresh');
       renderStats(getStats());
       refreshActiveView();
     } catch (err) {
+      if (gen !== loadGeneration) return; // stale error, ignore
       updateButtonStatus('st-error');
       const body = document.getElementById('sii-body');
       if (body) { body.innerHTML = ''; body.append(el('div', { id: 'sii-empty' }, `⚠️ ${err.message}. Try refreshing or check your token in ⚙ Settings.`)); }
     } finally {
-      isLoading = false;
-      document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.remove('sii-loading'));
-      if (pendingAdminSwitch) {
-        pendingAdminSwitch = false;
-        handleRefresh();
+      if (gen === loadGeneration) {
+        isLoading = false;
+        document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.remove('sii-loading'));
       }
     }
   }
@@ -2138,21 +2147,25 @@
       if (!isLoading) updateButtonStatus(computeButtonStatus());
       if (!getToken() || isLoading) return;
       if (NOW_S() - lastLoadedAt < getStaleSecs()) return;
+      const gen = ++loadGeneration;
       try {
         isLoading = true;
         updateButtonStatus('st-loading');
         await ensureAdminInfo();
+        if (gen !== loadGeneration) return;
         await loadAllDatasets();
+        if (gen !== loadGeneration) return;
         lastLoadedAt = NOW_S();
-        isLoading = false;
         updateButtonStatus('st-fresh');
         if (document.getElementById('sii-overlay') && !settingsVisible) {
           renderStats(getStats());
           refreshActiveView();
         }
       } catch (_) {
-        isLoading = false;
+        if (gen !== loadGeneration) return;
         updateButtonStatus('st-error');
+      } finally {
+        if (gen === loadGeneration) isLoading = false;
       }
     }, 60 * 1000);
   }
