@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.8.2
+// @version      2.8.3
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -148,6 +148,7 @@
   let loadGeneration = 0;
   let lastLoadedAt  = 0;
   let debugMode     = false;
+  let _lastBtnStatus = null;
 
   function getRefreshMins() {
     const v = parseInt(localStorage.getItem(STORAGE_REFRESH), 10);
@@ -169,18 +170,28 @@
   // Data cache (localStorage)
   // ---------------------------------------------------------------------------
 
+  let _saveCacheId = null;
   function saveCache() {
-    try {
-      const payload = {
-        ts: NOW_S(),
-        datasets: {},
-        convCompanyMap,
-        convResponsesMap,
-        teamsMap: teamsMap || {},
-      };
-      for (const [k, v] of Object.entries(datasets)) payload.datasets[k] = v;
-      localStorage.setItem(STORAGE_CACHE, JSON.stringify(payload));
-    } catch (_) {}
+    if (_saveCacheId) return; // already scheduled
+    const doSave = () => {
+      _saveCacheId = null;
+      try {
+        const payload = {
+          ts: NOW_S(),
+          datasets: {},
+          convCompanyMap,
+          convResponsesMap,
+          teamsMap: teamsMap || {},
+        };
+        for (const [k, v] of Object.entries(datasets)) payload.datasets[k] = v;
+        localStorage.setItem(STORAGE_CACHE, JSON.stringify(payload));
+      } catch (_) {}
+    };
+    if (typeof requestIdleCallback === 'function') {
+      _saveCacheId = requestIdleCallback(doSave, { timeout: 5000 });
+    } else {
+      _saveCacheId = setTimeout(doSave, 200);
+    }
   }
 
   function loadCache() {
@@ -1288,6 +1299,7 @@
     if (sep) sep.style.removeProperty('display');
 
     let highlightIdx = -1;
+    let _highlightedEl = null;
 
     const wrapper = el('div', { className: `sii-combo${companyFilter ? ' has-value' : ''}` });
     const input = document.createElement('input');
@@ -1309,6 +1321,7 @@
     function buildOptions(filter) {
       listBox.innerHTML = '';
       highlightIdx = -1;
+      _highlightedEl = null;
       const q = (filter || '').toLowerCase();
       const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
       if (!filtered.length) {
@@ -1326,8 +1339,9 @@
             selectCompany(name);
           },
           onMouseenter() {
-            listBox.querySelectorAll('.highlighted').forEach(o => o.classList.remove('highlighted'));
+            if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
             opt.classList.add('highlighted');
+            _highlightedEl = opt;
             highlightIdx = i;
           },
         }, name);
@@ -1370,15 +1384,17 @@
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         highlightIdx = Math.min(highlightIdx + 1, opts.length - 1);
-        opts.forEach(o => o.classList.remove('highlighted'));
-        opts[highlightIdx]?.classList.add('highlighted');
-        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+        if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+        _highlightedEl = opts[highlightIdx] ?? null;
+        _highlightedEl?.classList.add('highlighted');
+        _highlightedEl?.scrollIntoView({ block: 'nearest' });
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         highlightIdx = Math.max(highlightIdx - 1, 0);
-        opts.forEach(o => o.classList.remove('highlighted'));
-        opts[highlightIdx]?.classList.add('highlighted');
-        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+        if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+        _highlightedEl = opts[highlightIdx] ?? null;
+        _highlightedEl?.classList.add('highlighted');
+        _highlightedEl?.scrollIntoView({ block: 'nearest' });
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (highlightIdx >= 0 && opts[highlightIdx]) {
@@ -1411,6 +1427,7 @@
 
     const admins = cachedAdmins;
     let highlightIdx = -1;
+    let _highlightedEl = null;
 
     const wrapper = el('div', { className: 'sii-combo sii-admin-switcher has-value' });
     const input = document.createElement('input');
@@ -1425,6 +1442,7 @@
     function buildOptions(filter) {
       listBox.innerHTML = '';
       highlightIdx = -1;
+      _highlightedEl = null;
       const q = (filter || '').toLowerCase();
       const filtered = q
         ? admins.filter(a => ((a.name || '') + ' ' + (a.email || '')).toLowerCase().includes(q))
@@ -1445,8 +1463,9 @@
             selectAdmin(admin);
           },
           onMouseenter() {
-            listBox.querySelectorAll('.highlighted').forEach(o => o.classList.remove('highlighted'));
+            if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
             opt.classList.add('highlighted');
+            _highlightedEl = opt;
             highlightIdx = i;
           },
         }, label);
@@ -1507,15 +1526,17 @@
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         highlightIdx = Math.min(highlightIdx + 1, opts.length - 1);
-        opts.forEach(o => o.classList.remove('highlighted'));
-        opts[highlightIdx]?.classList.add('highlighted');
-        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+        if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+        _highlightedEl = opts[highlightIdx] ?? null;
+        _highlightedEl?.classList.add('highlighted');
+        _highlightedEl?.scrollIntoView({ block: 'nearest' });
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         highlightIdx = Math.max(highlightIdx - 1, 0);
-        opts.forEach(o => o.classList.remove('highlighted'));
-        opts[highlightIdx]?.classList.add('highlighted');
-        opts[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+        if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+        _highlightedEl = opts[highlightIdx] ?? null;
+        _highlightedEl?.classList.add('highlighted');
+        _highlightedEl?.scrollIntoView({ block: 'nearest' });
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (highlightIdx >= 0 && opts[highlightIdx]) {
@@ -1551,6 +1572,7 @@
    */
   function buildDragList({ allDefs, idField, getActive, setActive, getLabel, onToggle }) {
     let dragSrc = null;
+    let _dragRaf = null;
     const list = el('div', { className: 'sii-col-list' });
     const active = getActive();
 
@@ -1597,8 +1619,12 @@
         item.addEventListener('dragover', e => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
-          list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
-          if (dragSrc !== itemId) item.classList.add('sii-drag-over');
+          if (_dragRaf) return;
+          _dragRaf = requestAnimationFrame(() => {
+            _dragRaf = null;
+            list.querySelectorAll('.sii-drag-over').forEach(i => i.classList.remove('sii-drag-over'));
+            if (dragSrc !== itemId) item.classList.add('sii-drag-over');
+          });
         });
         item.addEventListener('dragleave', () => item.classList.remove('sii-drag-over'));
         item.addEventListener('drop', e => {
@@ -2065,6 +2091,8 @@
   const BTN_STATES = ['st-none', 'st-loading', 'st-fresh', 'st-stale', 'st-error'];
 
   function updateButtonStatus(state) {
+    if (state === _lastBtnStatus) return;
+    _lastBtnStatus = state;
     const btn = document.getElementById('sii-btn');
     if (!btn) return;
     btn.classList.remove(...BTN_STATES);
@@ -2155,32 +2183,37 @@
     }, '☰', el('span', { className: 'sii-dot' })));
     updateButtonStatus(computeButtonStatus());
 
-    setInterval(async () => {
-      // Keep button dot in sync (green → amber when data goes stale)
-      if (!isLoading) updateButtonStatus(computeButtonStatus());
-      if (!getToken() || isLoading) return;
-      if (NOW_S() - lastLoadedAt < getStaleSecs()) return;
-      const gen = ++loadGeneration;
+    async function backgroundTick() {
       try {
-        isLoading = true;
-        updateButtonStatus('st-loading');
-        await ensureAdminInfo();
-        if (gen !== loadGeneration) return;
-        await loadAllDatasets();
-        if (gen !== loadGeneration) return;
-        lastLoadedAt = NOW_S();
-        updateButtonStatus('st-fresh');
-        if (document.getElementById('sii-overlay') && !settingsVisible) {
-          renderStats(getStats());
-          refreshActiveView();
+        // Keep button dot in sync (green → amber when data goes stale)
+        if (!isLoading) updateButtonStatus(computeButtonStatus());
+        if (!getToken() || isLoading) return;
+        if (NOW_S() - lastLoadedAt < getStaleSecs()) return;
+        const gen = ++loadGeneration;
+        try {
+          isLoading = true;
+          updateButtonStatus('st-loading');
+          await ensureAdminInfo();
+          if (gen !== loadGeneration) return;
+          await loadAllDatasets();
+          if (gen !== loadGeneration) return;
+          lastLoadedAt = NOW_S();
+          updateButtonStatus('st-fresh');
+          if (document.getElementById('sii-overlay') && !settingsVisible) {
+            renderStats(getStats());
+            refreshActiveView();
+          }
+        } catch (_) {
+          if (gen !== loadGeneration) return;
+          updateButtonStatus('st-error');
+        } finally {
+          if (gen === loadGeneration) isLoading = false;
         }
-      } catch (_) {
-        if (gen !== loadGeneration) return;
-        updateButtonStatus('st-error');
       } finally {
-        if (gen === loadGeneration) isLoading = false;
+        setTimeout(backgroundTick, 60_000);
       }
-    }, 60 * 1000);
+    }
+    setTimeout(backgroundTick, 60_000);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
