@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.8.3
+// @version      2.8.4
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -436,6 +436,17 @@
       }
       return;
     }
+    // Try the /me endpoint — returns the admin who owns the API token
+    try {
+      const me = await apiRequest({ path: '/me' });
+      if (me?.type === 'admin' && me?.id) {
+        currentAdminId   = String(me.id);
+        currentAdminName = me.name || me.email || 'You';
+        localStorage.setItem(STORAGE_ADMIN_ID, currentAdminId);
+        localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
+        return;
+      }
+    } catch (_) {}
     // Fallback: fetch admins list and match by looking at who's logged in
     // This covers edge cases where the Ember session key format changes
     const admins = await ensureAdminsCache();
@@ -483,7 +494,7 @@
 
       const desc = document.createElement('div');
       Object.assign(desc.style, { fontSize: '13px', color: '#555', marginBottom: '12px' });
-      desc.textContent = 'Could not detect your identity automatically. Please select yourself:';
+      desc.textContent = 'Select your admin account to get started:';
 
       const search = document.createElement('input');
       search.type = 'text';
@@ -502,6 +513,7 @@
         maxHeight: '320px', overflowY: 'auto',
       });
 
+      admins.sort((a, b) => (a.name || a.email || '').localeCompare(b.name || b.email || ''));
       const buttons = [];
       for (const admin of admins) {
         const label = admin.name || admin.email || `Admin ${admin.id}`;
