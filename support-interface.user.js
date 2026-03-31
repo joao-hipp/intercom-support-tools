@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.8.4
+// @version      2.8.5
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -444,6 +444,8 @@
         currentAdminName = me.name || me.email || 'You';
         localStorage.setItem(STORAGE_ADMIN_ID, currentAdminId);
         localStorage.setItem(STORAGE_ADMIN_NAME, currentAdminName);
+        // Still load the admins list so the switcher dropdown works
+        ensureAdminsCache().then(() => renderAdminSwitcher()).catch(() => {});
         return;
       }
     } catch (_) {}
