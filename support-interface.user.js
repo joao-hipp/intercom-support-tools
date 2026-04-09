@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.0
+// @version      2.9.1
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -590,7 +590,7 @@
   async function fetchAllConvs(conditions) {
     const results = [];
     let cursor = null;
-    const query = conditions.length === 1 ? conditions[0] : { operator: 'AND', value: conditions };
+    const query = { operator: 'AND', value: conditions };
     do {
       const body = { query, pagination: { per_page: 150, ...(cursor ? { starting_after: cursor } : {}) } };
       const resp = await apiRequest({ method: 'POST', path: '/conversations/search', body });
@@ -661,7 +661,7 @@
 
     const allOpenP = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
-    ]).then(data => {
+    ]).catch(() => []).then(data => {
       datasets[F_ALL_OPEN] = data;
       notify([F_ALL_OPEN]);
       return data;
