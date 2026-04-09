@@ -7,7 +7,8 @@ This project is a single-file browser userscript (`support-interface.user.js`).
 - Do NOT attempt to run `preview_start` or install dependencies.
 
 ## Pre-commit checklist
-When bumping version, update **all three** locations:
+When bumping version, update **all four** locations:
 1. `support-interface.user.js` line 4 — `// @version X.Y.Z`
-2. `support-interface.meta.js` line 4 — `// @version X.Y.Z`
-3. `README.md` — version badge **and** add a changelog entry
+2. `support-interface.user.js` — `const SCRIPT_VERSION = 'X.Y.Z'`
+3. `support-interface.meta.js` line 4 — `// @version X.Y.Z`
+4. `README.md` — version badge **and** add a changelog entry

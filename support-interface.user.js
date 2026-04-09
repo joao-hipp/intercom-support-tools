@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.3
+// @version      2.9.4
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      api.intercom.io
+// @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js
 // @downloadURL  https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js
 // ==/UserScript==
@@ -29,6 +30,9 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
+  const SCRIPT_VERSION = '2.9.4';
+  const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
+  const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
 
   // Helper: get a Date representing "now" in São Paulo, but backed by a real UTC instant
   const spMidnight = (offsetDays = 0) => {
@@ -61,6 +65,7 @@
   const F_REPLIED_TODAY    = 'repliedToday';
   const F_REPLIED_WEEK     = 'repliedThisWeek';
   const F_CLOSED_WEEK      = 'closedThisWeek';
+  const F_ALL_OPEN         = 'allOpen';
   const F_UNASSIGNED       = 'unassigned';
   const F_UNANSWERED       = 'unanswered';
 
@@ -70,6 +75,7 @@
   // All filter card definitions (order = default display order)
   const ALL_FILTER_CARDS = [
     { key: F_BACKLOG,        label: null,                  sub: 'open conversations', cls: '',        required: true  },
+    { key: F_ALL_OPEN,       label: 'All Open',            sub: 'all conversations',  cls: 'teal',    required: false },
     { key: F_SLA_BREACHED,   label: 'SLA Breached',        sub: 'past deadline',      cls: 'danger',  required: false },
     { key: F_SLA_WARNING,    label: 'SLA Warning',         sub: '< 2h remaining',     cls: 'warning', required: false },
     { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no assignee',        cls: 'teal',    required: false },
@@ -94,6 +100,7 @@
     { id: 'responses', label: 'Responses' },
     { id: 'company',  label: 'Company' },
     { id: 'team',     label: 'Team' },
+    { id: 'assignee', label: 'Assignee' },
     { id: 'created',  label: 'Created' },
     { id: 'updated',  label: 'Updated' },
   ];
@@ -139,7 +146,7 @@
   // ---------------------------------------------------------------------------
 
   const datasets = {
-    [F_BACKLOG]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
+    [F_BACKLOG]: [], [F_ALL_OPEN]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
     [F_REPLIED_TODAY]: [], [F_REPLIED_WEEK]: [], [F_CLOSED_WEEK]: [],
     [F_UNASSIGNED]: [], [F_UNANSWERED]: [],
   };
@@ -266,15 +273,18 @@
   }
 
   let teamsMap = null;      // id → name, loaded once
+  let adminsMap = null;     // id → name, loaded once
   let companiesMap = null;  // id → name, loaded once
   let convCompanyMap = {};   // conv_id → company name
   let convResponsesMap = {}; // conv_id → number of admin replies
   let cachedAdmins = null;   // array of admin objects, loaded once
+  let latestVersion = null;  // remote version from GitHub, checked once
 
   async function ensureAdminsCache() {
     if (cachedAdmins) return cachedAdmins;
     const resp = await apiRequest({ path: '/admins' });
     cachedAdmins = (resp.admins ?? resp.data ?? []).filter(a => a.type === 'admin');
+    adminsMap = Object.fromEntries(cachedAdmins.map(a => [String(a.id), a.name]));
     return cachedAdmins;
   }
 
@@ -289,6 +299,20 @@
       if (debugMode) console.warn('[SII] Failed to load teams:', err.message);
       teamsMap = {};
     }
+  }
+
+  function checkForUpdate() {
+    if (latestVersion) return;
+    try {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: UPDATE_URL,
+        onload(resp) {
+          const m = resp.responseText.match(/@version\s+([\d.]+)/);
+          if (m) { latestVersion = m[1]; renderFooter(datasets[activeFilter] ?? []); }
+        },
+      });
+    } catch (_) {}
   }
 
   async function ensureCompaniesMap() {
@@ -657,12 +681,20 @@
       return data;
     });
 
-    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned] = await Promise.all([
-      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP,
+    const allOpenP = fetchAllConvs([
+      { field: 'state', operator: '=', value: 'open' },
+    ]).catch(() => []).then(data => {
+      datasets[F_ALL_OPEN] = data;
+      notify([F_ALL_OPEN]);
+      return data;
+    });
+
+    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned, allOpen] = await Promise.all([
+      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP, allOpenP,
     ]);
 
     // --- Phase 2: resolve companies + backlog responses (for unanswered) ---
-    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned].map(c => [c.id, c])).values()];
+    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned, ...allOpen].map(c => [c.id, c])).values()];
     await Promise.all([
       resolveConvCompanies(allConvs),
       resolveConvResponses(backlog),
@@ -815,6 +847,7 @@
       [F_REPLIED_TODAY]:  datasets[F_REPLIED_TODAY].length,
       [F_REPLIED_WEEK]:   datasets[F_REPLIED_WEEK].length,
       [F_CLOSED_WEEK]:    datasets[F_CLOSED_WEEK].length,
+      [F_ALL_OPEN]:       datasets[F_ALL_OPEN].length,
       [F_UNASSIGNED]:     datasets[F_UNASSIGNED].length,
       [F_UNANSWERED]:     datasets[F_UNANSWERED].length,
     };
@@ -1807,6 +1840,13 @@
           cells.push(el('td', {}, el('span', { className: 'sii-ts' }, team)));
           break;
         }
+        case 'assignee': {
+          const assignee = conv.admin_assignee_id
+            ? (adminsMap?.[String(conv.admin_assignee_id)] ?? `#${conv.admin_assignee_id}`)
+            : '—';
+          cells.push(el('td', {}, el('span', { className: 'sii-ts' }, assignee)));
+          break;
+        }
         case 'created':
           cells.push(el('td', {}, el('span', { className: 'sii-ts' }, fmtDate(conv.created_at))));
           break;
@@ -1910,7 +1950,21 @@
     const dismissedText = dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : '';
     const urgencyText = urgencyFilter ? ` · Urgency: ${urgencyFilter}` : '';
     const companyText = companyFilter ? ` · Company: ${companyFilter}` : '';
-    f.textContent = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${companyText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
+    f.textContent = '';
+    const statusText = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${companyText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
+    f.append(statusText);
+    const versionSpan = el('span', { style: { float: 'left', color: '#aaa' } });
+    versionSpan.textContent = `v${SCRIPT_VERSION}`;
+    if (latestVersion && latestVersion.localeCompare(SCRIPT_VERSION, undefined, { numeric: true }) > 0) {
+      versionSpan.textContent += ' · ';
+      const link = el('a', {
+        href: DOWNLOAD_URL,
+        target: '_blank',
+        style: { color: '#1a73e8', textDecoration: 'none' },
+      }, 'Update available');
+      versionSpan.append(link);
+    }
+    f.append(versionSpan);
   }
 
   // ---------------------------------------------------------------------------
@@ -1950,6 +2004,11 @@
     refreshInput.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
     const panel = el('div', { id: 'sii-settings' },
+      el('button', {
+        className: 'sii-icon-btn',
+        onClick: hideSettings,
+        style: { marginBottom: '8px', padding: '4px 8px', fontSize: '13px' },
+      }, '← Back'),
       el('h3', {}, 'API Token'),
       el('p', {}, 'Paste your Intercom API token below. Generate one at Settings → Developers → API Keys.'),
       tokenInput,
@@ -2208,6 +2267,7 @@
       },
     }, '☰', el('span', { className: 'sii-dot' })));
     updateButtonStatus(computeButtonStatus());
+    checkForUpdate();
 
     async function backgroundTick() {
       try {

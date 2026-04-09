@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.9.3-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.9.4-blue)
 
 ## Install
 
@@ -71,12 +71,12 @@ The script runs inside Intercom's web app via Tampermonkey. You provide your Int
 
 ## Changelog
 
-### v2.9.3
-- **Revert All Open filter** — removed All Open filter and restored original unassigned query logic
-
-### v2.9.0
-- **São Paulo timezone for "Today" filters** — "Replied Today" and "Assigned Today" now use the current calendar day in America/Sao_Paulo instead of the browser's local timezone
+### v2.9.4
 - **All Open filter** — new filter card showing all open conversations regardless of assignee
+- **São Paulo timezone for "Today" filters** — "Replied Today" and "Assigned Today" now use the current calendar day in America/Sao_Paulo instead of the browser's local timezone
+- **Assignee column** — new optional column showing the admin assigned to each conversation
+- **Version footer with update check** — footer now displays current version and an "Update available" link when a newer version is published on GitHub
+- **Settings back button** — added ← Back button to close Settings without saving
 
 ### v2.8.2
 - **Fixed Updated column** — now shows the last meaningful conversation event (reply, assignment, close) instead of Intercom's internal `updated_at` which gets bumped by SLA recalculations and bot workflows
