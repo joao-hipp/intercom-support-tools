@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.1
+// @version      2.9.2
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -590,7 +590,7 @@
   async function fetchAllConvs(conditions) {
     const results = [];
     let cursor = null;
-    const query = { operator: 'AND', value: conditions };
+    const query = conditions.length === 1 ? conditions[0] : { operator: 'AND', value: conditions };
     do {
       const body = { query, pagination: { per_page: 150, ...(cursor ? { starting_after: cursor } : {}) } };
       const resp = await apiRequest({ method: 'POST', path: '/conversations/search', body });
@@ -650,29 +650,25 @@
       return data;
     });
 
-    const unassignedP = fetchAllConvs([
+    const openOthersP = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
-      { field: 'admin_assignee_id', operator: '=', value: 0 },
+      { field: 'admin_assignee_id', operator: '!=', value: adminId },
     ]).catch(() => []).then(data => {
       datasets[F_UNASSIGNED] = data.filter(c => !c.assignee || c.assignee.type === 'nobody');
       notify([F_UNASSIGNED]);
       return data;
     });
 
-    const allOpenP = fetchAllConvs([
-      { field: 'state', operator: '=', value: 'open' },
-    ]).catch(() => []).then(data => {
-      datasets[F_ALL_OPEN] = data;
-      notify([F_ALL_OPEN]);
-      return data;
-    });
-
-    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned, allOpen] = await Promise.all([
-      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP, allOpenP,
+    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, openOthers] = await Promise.all([
+      backlogP, assignedWeekP, repliedWeekP, closedWeekP, openOthersP,
     ]);
 
+    // All Open = my open (backlog) + everyone else's open (openOthers)
+    datasets[F_ALL_OPEN] = [...new Map([...backlog, ...openOthers].map(c => [c.id, c])).values()];
+    notify([F_ALL_OPEN]);
+
     // --- Phase 2: resolve companies + backlog responses (for unanswered) ---
-    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned, ...allOpen].map(c => [c.id, c])).values()];
+    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...openOthers].map(c => [c.id, c])).values()];
     await Promise.all([
       resolveConvCompanies(allConvs),
       resolveConvResponses(backlog),
