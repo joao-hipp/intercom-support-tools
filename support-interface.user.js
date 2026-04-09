@@ -30,15 +30,27 @@
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
 
-  const TODAY_START_S = (() => {
-    const d = new Date(); d.setHours(0, 0, 0, 0);
-    return Math.floor(d.getTime() / 1000);
-  })();
+  // Helper: get a Date representing "now" in São Paulo, but backed by a real UTC instant
+  const spMidnight = (offsetDays = 0) => {
+    const now = new Date();
+    // Build a Date whose local fields match São Paulo wall-clock time
+    const sp = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    sp.setHours(0, 0, 0, 0);
+    if (offsetDays) sp.setDate(sp.getDate() + offsetDays);
+    // Shift back to a real UTC instant
+    const diff = now.getTime() - new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getTime();
+    return Math.floor((sp.getTime() + diff) / 1000);
+  };
+
+  const TODAY_START_S = spMidnight();
 
   const WEEK_START_S = (() => {
-    const d = new Date(); d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - d.getDay());
-    return Math.floor(d.getTime() / 1000);
+    const now = new Date();
+    const sp = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    sp.setHours(0, 0, 0, 0);
+    sp.setDate(sp.getDate() - sp.getDay());
+    const diff = now.getTime() - new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getTime();
+    return Math.floor((sp.getTime() + diff) / 1000);
   })();
 
   const F_BACKLOG          = 'backlog';
@@ -49,6 +61,7 @@
   const F_REPLIED_TODAY    = 'repliedToday';
   const F_REPLIED_WEEK     = 'repliedThisWeek';
   const F_CLOSED_WEEK      = 'closedThisWeek';
+  const F_ALL_OPEN         = 'allOpen';
   const F_UNASSIGNED       = 'unassigned';
   const F_UNANSWERED       = 'unanswered';
 
@@ -58,6 +71,7 @@
   // All filter card definitions (order = default display order)
   const ALL_FILTER_CARDS = [
     { key: F_BACKLOG,        label: null,                  sub: 'open conversations', cls: '',        required: true  },
+    { key: F_ALL_OPEN,       label: 'All Open',            sub: 'all conversations',  cls: 'teal',    required: false },
     { key: F_SLA_BREACHED,   label: 'SLA Breached',        sub: 'past deadline',      cls: 'danger',  required: false },
     { key: F_SLA_WARNING,    label: 'SLA Warning',         sub: '< 2h remaining',     cls: 'warning', required: false },
     { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no assignee',        cls: 'teal',    required: false },
@@ -127,7 +141,7 @@
   // ---------------------------------------------------------------------------
 
   const datasets = {
-    [F_BACKLOG]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
+    [F_BACKLOG]: [], [F_ALL_OPEN]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
     [F_REPLIED_TODAY]: [], [F_REPLIED_WEEK]: [], [F_CLOSED_WEEK]: [],
     [F_UNASSIGNED]: [], [F_UNANSWERED]: [],
   };
@@ -645,12 +659,20 @@
       return data;
     });
 
-    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned] = await Promise.all([
-      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP,
+    const allOpenP = fetchAllConvs([
+      { field: 'state', operator: '=', value: 'open' },
+    ]).then(data => {
+      datasets[F_ALL_OPEN] = data;
+      notify([F_ALL_OPEN]);
+      return data;
+    });
+
+    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned, allOpen] = await Promise.all([
+      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP, allOpenP,
     ]);
 
     // --- Phase 2: resolve companies + backlog responses (for unanswered) ---
-    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned].map(c => [c.id, c])).values()];
+    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned, ...allOpen].map(c => [c.id, c])).values()];
     await Promise.all([
       resolveConvCompanies(allConvs),
       resolveConvResponses(backlog),
