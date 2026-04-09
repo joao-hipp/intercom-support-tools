@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.2
+// @version      2.9.3
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -61,7 +61,6 @@
   const F_REPLIED_TODAY    = 'repliedToday';
   const F_REPLIED_WEEK     = 'repliedThisWeek';
   const F_CLOSED_WEEK      = 'closedThisWeek';
-  const F_ALL_OPEN         = 'allOpen';
   const F_UNASSIGNED       = 'unassigned';
   const F_UNANSWERED       = 'unanswered';
 
@@ -71,7 +70,6 @@
   // All filter card definitions (order = default display order)
   const ALL_FILTER_CARDS = [
     { key: F_BACKLOG,        label: null,                  sub: 'open conversations', cls: '',        required: true  },
-    { key: F_ALL_OPEN,       label: 'All Open',            sub: 'all conversations',  cls: 'teal',    required: false },
     { key: F_SLA_BREACHED,   label: 'SLA Breached',        sub: 'past deadline',      cls: 'danger',  required: false },
     { key: F_SLA_WARNING,    label: 'SLA Warning',         sub: '< 2h remaining',     cls: 'warning', required: false },
     { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no assignee',        cls: 'teal',    required: false },
@@ -141,7 +139,7 @@
   // ---------------------------------------------------------------------------
 
   const datasets = {
-    [F_BACKLOG]: [], [F_ALL_OPEN]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
+    [F_BACKLOG]: [], [F_ASSIGNED_TODAY]: [], [F_ASSIGNED_WEEK]: [],
     [F_REPLIED_TODAY]: [], [F_REPLIED_WEEK]: [], [F_CLOSED_WEEK]: [],
     [F_UNASSIGNED]: [], [F_UNANSWERED]: [],
   };
@@ -650,25 +648,21 @@
       return data;
     });
 
-    const openOthersP = fetchAllConvs([
+    const unassignedP = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
-      { field: 'admin_assignee_id', operator: '!=', value: adminId },
+      { field: 'admin_assignee_id', operator: '=', value: 0 },
     ]).catch(() => []).then(data => {
       datasets[F_UNASSIGNED] = data.filter(c => !c.assignee || c.assignee.type === 'nobody');
       notify([F_UNASSIGNED]);
       return data;
     });
 
-    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, openOthers] = await Promise.all([
-      backlogP, assignedWeekP, repliedWeekP, closedWeekP, openOthersP,
+    const [backlog, assignedThisWeek, repliedThisWeek, closedThisWeek, unassigned] = await Promise.all([
+      backlogP, assignedWeekP, repliedWeekP, closedWeekP, unassignedP,
     ]);
 
-    // All Open = my open (backlog) + everyone else's open (openOthers)
-    datasets[F_ALL_OPEN] = [...new Map([...backlog, ...openOthers].map(c => [c.id, c])).values()];
-    notify([F_ALL_OPEN]);
-
     // --- Phase 2: resolve companies + backlog responses (for unanswered) ---
-    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...openOthers].map(c => [c.id, c])).values()];
+    const allConvs = [...new Map([...backlog, ...assignedThisWeek, ...repliedThisWeek, ...closedThisWeek, ...unassigned].map(c => [c.id, c])).values()];
     await Promise.all([
       resolveConvCompanies(allConvs),
       resolveConvResponses(backlog),
