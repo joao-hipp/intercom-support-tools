@@ -12,7 +12,7 @@ A personal queue health dashboard for Intercom — gives support engineers a qui
    ### [Click here to install](https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js)
 
 3. Click **Install**. A ☰ button with a coloured status dot will appear on the right side of your Intercom page.
-4. Click it — if no API token is configured yet, Settings will open automatically so you can paste your token.
+4. Click it — if no API token is configured yet, Settings will open automatically so you can paste your token. If you don't have one access [this intercom doc](https://developers.intercom.com/docs/build-an-integration/learn-more/authentication) to learn how to generate one. 
 
 ## Features
 
