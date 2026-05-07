@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.4
+// @version      2.9.5
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -30,9 +30,11 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
-  const SCRIPT_VERSION = '2.9.4';
+  const SCRIPT_VERSION = '2.9.5';
   const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
   const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
+  const STORAGE_OPEN_ON_LOAD = 'sii_open_on_load';
+  const STORAGE_MODAL_SIZE   = 'sii_modal_size';
 
   // Helper: get a Date representing "now" in São Paulo, but backed by a real UTC instant
   const spMidnight = (offsetDays = 0) => {
@@ -163,6 +165,7 @@
   let colMgrVisible = false;
   let activeFilterCards = loadFilterPrefs();
   let filterMgrVisible = false;
+  let teamFilter    = null;  // null = all teams, string = team name
   let isLoading     = false;
   let loadGeneration = 0;
   let lastLoadedAt  = 0;
@@ -709,6 +712,7 @@
     clearDismissed();
     urgencyFilter = null;
     companyFilter = null;
+    teamFilter    = null;
     saveCache();
 
     // --- Phase 3: resolve remaining response counts in background ---
@@ -772,11 +776,21 @@
       convs = convs.filter(c => (convCompanyMap[String(c.id)] || '') === companyFilter);
     }
 
+    if (teamFilter !== null) {
+      convs = convs.filter(c => {
+        const name = c.team_assignee_id
+          ? (teamsMap?.[String(c.team_assignee_id)] ?? null)
+          : null;
+        return name === teamFilter;
+      });
+    }
+
     return sortConvs(convs);
   }
 
   let _lastCompanyKeys = '';
   let _lastUrgencyKeys = '';
+  let _lastTeamKeys    = '';
 
   /** Re-render the active table + footer (+ sub-filters). Shorthand used by many handlers. */
   function refreshActiveView() {
@@ -790,6 +804,12 @@
 
     const urgencyKeys = [...new Set(convs.map(c => getUrgency(c) ?? ''))].sort().join('\0');
     if (urgencyKeys !== _lastUrgencyKeys) { _lastUrgencyKeys = urgencyKeys; renderUrgencyFilter(); }
+
+    const teamKeys = getTeamValues(convs).join('\0');
+    if (teamKeys !== _lastTeamKeys) { _lastTeamKeys = teamKeys; renderTeamFilter(); }
+
+    const dataSep = document.getElementById('sii-data-sep');
+    if (dataSep) dataSep.style.display = (companyKeys || teamKeys) ? '' : 'none';
   }
 
   function sortConvs(convs) {
@@ -1004,6 +1024,16 @@
       display: flex; flex-direction: column;
       box-shadow: 0 24px 64px rgba(0,0,0,0.22); overflow: hidden;
       position: relative;
+    }
+
+    .sii-resize-handle {
+      position: absolute; bottom: 0; right: 0;
+      width: 16px; height: 16px; cursor: nwse-resize;
+      background: repeating-linear-gradient(
+        -45deg, #ccc 0px, #ccc 1px, transparent 1px, transparent 4px
+      );
+      border-radius: 0 0 12px 0;
+      z-index: 1;
     }
 
     #sii-header {
@@ -1270,6 +1300,7 @@
     activeFilter = key;
     urgencyFilter = null;
     companyFilter = null;
+    teamFilter    = null;
     document.querySelectorAll('.sii-stat-card').forEach(c => c.classList.toggle('active', c.dataset.statKey === key));
     const label = document.getElementById('sii-active-label');
     if (label) label.textContent = filterLabel(key);
@@ -1295,16 +1326,11 @@
 
   function renderUrgencyFilter() {
     const container = document.getElementById('sii-urgency-filter');
-    const sep = document.getElementById('sii-urgency-sep');
     if (!container) return;
     container.innerHTML = '';
 
     const vals = getUrgencyValues();
-    if (vals.length === 0) {
-      if (sep) sep.style.display = 'none';
-      return;
-    }
-    if (sep) sep.style.removeProperty('display');
+    if (vals.length === 0) return;
 
     const group = el('div', { className: 'sii-tab-group' });
 
@@ -1346,16 +1372,11 @@
 
   function renderCompanyFilter() {
     const container = document.getElementById('sii-company-filter');
-    const sep = document.getElementById('sii-company-sep');
     if (!container) return;
     container.innerHTML = '';
 
     const allNames = getCompanyValues();
-    if (allNames.length === 0) {
-      if (sep) sep.style.display = 'none';
-      return;
-    }
-    if (sep) sep.style.removeProperty('display');
+    if (allNames.length === 0) return;
 
     let highlightIdx = -1;
     let _highlightedEl = null;
@@ -1470,6 +1491,140 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Team filter (searchable dropdown / combobox)
+  // ---------------------------------------------------------------------------
+
+  function getTeamValues(convs) {
+    if (!convs) convs = getActiveConversations();
+    const names = new Set();
+    for (const c of convs) {
+      if (c.team_assignee_id) {
+        const name = teamsMap?.[String(c.team_assignee_id)];
+        if (name) names.add(name);
+      }
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }
+
+  function renderTeamFilter() {
+    const container = document.getElementById('sii-team-filter');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const allNames = getTeamValues();
+    if (allNames.length === 0) return;
+
+    let highlightIdx = -1;
+    let _highlightedEl = null;
+
+    const wrapper = el('div', { className: `sii-combo${teamFilter ? ' has-value' : ''}` });
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'sii-combo-input';
+    input.placeholder = 'All teams';
+    input.value = teamFilter || '';
+
+    const clearBtn = el('button', { className: 'sii-combo-clear', onClick(e) {
+      e.stopPropagation();
+      teamFilter = null;
+      input.value = '';
+      wrapper.classList.remove('has-value', 'open');
+      refreshActiveView();
+    }}, '×');
+
+    const listBox = el('div', { className: 'sii-combo-list' });
+
+    function buildOptions(filter) {
+      listBox.innerHTML = '';
+      highlightIdx = -1;
+      _highlightedEl = null;
+      const q = (filter || '').toLowerCase();
+      const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
+      if (!filtered.length) {
+        listBox.append(el('div', { className: 'sii-combo-empty' }, 'No matches'));
+        return;
+      }
+      for (let i = 0; i < filtered.length; i++) {
+        const name = filtered[i];
+        const isActive = name === teamFilter;
+        const opt = el('div', {
+          className: `sii-combo-opt${isActive ? ' active' : ''}`,
+          'data-idx': i,
+          onMousedown(e) {
+            e.preventDefault();
+            selectTeam(name);
+          },
+          onMouseenter() {
+            if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+            opt.classList.add('highlighted');
+            _highlightedEl = opt;
+            highlightIdx = i;
+          },
+        }, name);
+        listBox.append(opt);
+      }
+    }
+
+    function selectTeam(name) {
+      teamFilter = name;
+      input.value = name;
+      wrapper.classList.add('has-value');
+      wrapper.classList.remove('open');
+      refreshActiveView();
+    }
+
+    input.addEventListener('focus', () => {
+      buildOptions(input.value);
+      wrapper.classList.add('open');
+    });
+
+    input.addEventListener('blur', () => {
+      setTimeout(() => wrapper.classList.remove('open'), 150);
+    });
+
+    input.addEventListener('input', () => {
+      buildOptions(input.value);
+      if (!wrapper.classList.contains('open')) wrapper.classList.add('open');
+      if (!input.value.trim()) {
+        teamFilter = null;
+        wrapper.classList.remove('has-value');
+        refreshActiveView();
+      }
+    });
+
+    input.addEventListener('keydown', (e) => {
+      const opts = listBox.querySelectorAll('.sii-combo-opt');
+      if (!opts.length) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        highlightIdx = Math.min(highlightIdx + 1, opts.length - 1);
+        if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+        _highlightedEl = opts[highlightIdx] ?? null;
+        _highlightedEl?.classList.add('highlighted');
+        _highlightedEl?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        highlightIdx = Math.max(highlightIdx - 1, 0);
+        if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
+        _highlightedEl = opts[highlightIdx] ?? null;
+        _highlightedEl?.classList.add('highlighted');
+        _highlightedEl?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (highlightIdx >= 0 && opts[highlightIdx]) {
+          selectTeam(opts[highlightIdx].textContent);
+        }
+      } else if (e.key === 'Escape') {
+        wrapper.classList.remove('open');
+        input.blur();
+      }
+    });
+
+    wrapper.append(input, clearBtn, listBox);
+    container.append(el('span', { className: 'sii-ctrl-label' }, 'Team:'), wrapper);
+  }
+
+  // ---------------------------------------------------------------------------
   // Admin switcher (searchable dropdown in header)
   // ---------------------------------------------------------------------------
 
@@ -1555,6 +1710,7 @@
       lastLoadedAt = 0;
       _lastCompanyKeys = '';
       _lastUrgencyKeys = '';
+      _lastTeamKeys    = '';
 
       handleRefresh();
     }
@@ -1950,8 +2106,9 @@
     const dismissedText = dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : '';
     const urgencyText = urgencyFilter ? ` · Urgency: ${urgencyFilter}` : '';
     const companyText = companyFilter ? ` · Company: ${companyFilter}` : '';
+    const teamText    = teamFilter    ? ` · Team: ${teamFilter}`       : '';
     f.textContent = '';
-    const statusText = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${companyText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
+    const statusText = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${companyText}${teamText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
     f.append(statusText);
     const versionSpan = el('span', { style: { float: 'left', color: '#aaa' } });
     versionSpan.textContent = `v${SCRIPT_VERSION}`;
@@ -2029,7 +2186,7 @@
           handleRefresh();
         }}, 'Save & Load'),
         el('button', { className: 'sii-danger-btn', onClick() {
-          [STORAGE_TOKEN, STORAGE_ADMIN_ID, STORAGE_ADMIN_NAME, STORAGE_DISMISSED, STORAGE_REFRESH, STORAGE_CACHE].forEach(k => localStorage.removeItem(k));
+          [STORAGE_TOKEN, STORAGE_ADMIN_ID, STORAGE_ADMIN_NAME, STORAGE_DISMISSED, STORAGE_REFRESH, STORAGE_CACHE, STORAGE_MODAL_SIZE].forEach(k => localStorage.removeItem(k));
           currentAdminId = null; currentAdminName = null; lastLoadedAt = 0;
           clearDismissed();
           hideSettings();
@@ -2068,23 +2225,25 @@
           el('button', { className: 'sii-icon-btn', onClick: handleRefresh }, '↻ Refresh'),
           el('button', { id: 'sii-filter-btn', className: 'sii-icon-btn', onClick: toggleFilterMgr }, '⊟ Filters'),
           el('button', { id: 'sii-col-btn', className: 'sii-icon-btn', onClick: toggleColMgr }, '⊞ Columns'),
+          el('button', { className: 'sii-icon-btn', onClick: openInNewTab }, '⧉ New Tab'),
           el('button', { className: 'sii-icon-btn', onClick: showSettings }, '⚙ Settings'),
           el('button', { className: 'sii-icon-btn', onClick: closeModal }, '✕'),
         ),
       ),
       el('div', { id: 'sii-stats' }),
       el('div', { id: 'sii-controls' },
+        el('span', { id: 'sii-active-label' }, filterLabel(activeFilter)),
+        el('div', { className: 'sii-sep' }),
         el('span', { className: 'sii-ctrl-label' }, 'Sort:'),
         buildSortButtons(),
-        el('div', { className: 'sii-sep' }),
-        el('span', { id: 'sii-active-label' }, filterLabel(activeFilter)),
-        el('div', { className: 'sii-sep', id: 'sii-company-sep', style: { display: 'none' } }),
-        el('div', { id: 'sii-company-filter' }),
-        el('div', { className: 'sii-sep', id: 'sii-urgency-sep', style: { display: 'none' } }),
         el('div', { id: 'sii-urgency-filter' }),
+        el('div', { className: 'sii-sep', id: 'sii-data-sep', style: { display: 'none' } }),
+        el('div', { id: 'sii-company-filter' }),
+        el('div', { id: 'sii-team-filter' }),
       ),
       el('div', { id: 'sii-body' }),
       el('div', { id: 'sii-footer' }, ''),
+      el('div', { className: 'sii-resize-handle', id: 'sii-resize-handle' }),
     );
 
     overlay.append(modal);
@@ -2134,9 +2293,24 @@
     }
   }
 
-  function openModal() {
+  function openModal(fullscreen = false) {
     if (document.getElementById('sii-overlay')) return;
     document.body.append(buildModal());
+    initResizeHandle();
+
+    if (fullscreen) {
+      const overlay = document.getElementById('sii-overlay');
+      const modal   = document.getElementById('sii-modal');
+      if (overlay) overlay.style.background = '#fff';
+      if (modal) {
+        modal.style.width        = '100vw';
+        modal.style.height       = '100vh';
+        modal.style.maxWidth     = 'none';
+        modal.style.maxHeight    = 'none';
+        modal.style.borderRadius = '0';
+      }
+      document.getElementById('sii-resize-handle')?.style.setProperty('display', 'none');
+    }
 
     // Try to restore cached data if we have nothing in memory
     const hasData = lastLoadedAt > 0;
@@ -2155,6 +2329,7 @@
       renderFooter(convs);
       renderCompanyFilter();
       renderUrgencyFilter();
+      renderTeamFilter();
       // Background-refresh if stale
       if (!isFresh) handleRefresh();
     } else {
@@ -2167,6 +2342,54 @@
     document.getElementById('sii-overlay')?.remove();
     settingsVisible = false;
     colMgrVisible = false;
+  }
+
+  function openInNewTab() {
+    try { localStorage.setItem(STORAGE_OPEN_ON_LOAD, '1'); } catch (_) {}
+    window.open(window.location.href, '_blank');
+  }
+
+  function initResizeHandle() {
+    const modal  = document.getElementById('sii-modal');
+    const handle = document.getElementById('sii-resize-handle');
+    if (!modal || !handle) return;
+
+    // Restore previously saved size
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_MODAL_SIZE));
+      if (saved?.w && saved?.h) {
+        modal.style.width     = saved.w;
+        modal.style.height    = saved.h;
+        modal.style.maxWidth  = 'none';
+        modal.style.maxHeight = 'none';
+      }
+    } catch (_) {}
+
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const startX = e.clientX, startY = e.clientY;
+      const startW = modal.offsetWidth, startH = modal.offsetHeight;
+
+      function onMove(e) {
+        const w = Math.max(600, startW + (e.clientX - startX));
+        const h = Math.max(400, startH + (e.clientY - startY));
+        modal.style.width     = `${w}px`;
+        modal.style.height    = `${h}px`;
+        modal.style.maxWidth  = 'none';
+        modal.style.maxHeight = 'none';
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        try {
+          localStorage.setItem(STORAGE_MODAL_SIZE, JSON.stringify({
+            w: modal.style.width, h: modal.style.height,
+          }));
+        } catch (_) {}
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2256,6 +2479,12 @@
   // ---------------------------------------------------------------------------
 
   function init() {
+    // Auto-open when redirected from the "New Tab" button
+    if (localStorage.getItem(STORAGE_OPEN_ON_LOAD)) {
+      localStorage.removeItem(STORAGE_OPEN_ON_LOAD);
+      setTimeout(() => openModal(true), 800);
+    }
+
     const style = document.createElement('style');
     style.textContent = CSS;
     document.head.append(style);
