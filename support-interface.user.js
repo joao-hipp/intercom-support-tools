@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.5
+// @version      2.9.6
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -30,7 +30,7 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
-  const SCRIPT_VERSION = '2.9.5';
+  const SCRIPT_VERSION = '2.9.6';
   const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
   const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
   const STORAGE_OPEN_ON_LOAD = 'sii_open_on_load';
@@ -166,6 +166,8 @@
   let activeFilterCards = loadFilterPrefs();
   let filterMgrVisible = false;
   let teamFilter    = null;  // null = all teams, string = team name
+  const NO_COMPANY_FILTER = '\x00no-company';
+  const NO_TEAM_FILTER    = '\x00no-team';
   let isLoading     = false;
   let loadGeneration = 0;
   let lastLoadedAt  = 0;
@@ -773,16 +775,24 @@
     }
 
     if (companyFilter !== null) {
-      convs = convs.filter(c => (convCompanyMap[String(c.id)] || '') === companyFilter);
+      if (companyFilter === NO_COMPANY_FILTER) {
+        convs = convs.filter(c => !convCompanyMap[String(c.id)]);
+      } else {
+        convs = convs.filter(c => (convCompanyMap[String(c.id)] || '') === companyFilter);
+      }
     }
 
     if (teamFilter !== null) {
-      convs = convs.filter(c => {
-        const name = c.team_assignee_id
-          ? (teamsMap?.[String(c.team_assignee_id)] ?? null)
-          : null;
-        return name === teamFilter;
-      });
+      if (teamFilter === NO_TEAM_FILTER) {
+        convs = convs.filter(c => !c.team_assignee_id);
+      } else {
+        convs = convs.filter(c => {
+          const name = c.team_assignee_id
+            ? (teamsMap?.[String(c.team_assignee_id)] ?? null)
+            : null;
+          return name === teamFilter;
+        });
+      }
     }
 
     return sortConvs(convs);
@@ -1126,8 +1136,8 @@
     }
     #sii-urgency-filter { display: flex; align-items: center; gap: 6px; }
 
-    /* Company filter dropdown */
-    #sii-company-filter { display: flex; align-items: center; gap: 6px; }
+    /* Company / Team filter dropdowns */
+    #sii-company-filter, #sii-team-filter { display: flex; align-items: center; gap: 6px; }
     .sii-combo { position: relative; min-width: 180px; }
     .sii-combo-input {
       width: 100%; box-sizing: border-box;
@@ -1158,6 +1168,8 @@
     .sii-combo-opt:hover, .sii-combo-opt.highlighted { background: #edf4fb; }
     .sii-combo-opt.active { background: #1f73b7; color: #fff; }
     .sii-combo-empty { padding: 8px 10px; font-size: 11px; color: #999; font-style: italic; }
+    .sii-combo-opt-none { font-style: italic; color: #888; }
+    .sii-combo-opt-none.active { color: #fff; }
 
     /* Column manager panel */
     #sii-col-panel {
@@ -1404,19 +1416,26 @@
       _highlightedEl = null;
       const q = (filter || '').toLowerCase();
       const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
-      if (!filtered.length) {
+      const items = [];
+      if (!q && getActiveConversations().some(c => !convCompanyMap[String(c.id)])) {
+        items.push({ label: 'No company', value: NO_COMPANY_FILTER });
+      }
+      for (const name of filtered) items.push({ label: name, value: name });
+      if (!items.length) {
         listBox.append(el('div', { className: 'sii-combo-empty' }, 'No matches'));
         return;
       }
-      for (let i = 0; i < filtered.length; i++) {
-        const name = filtered[i];
-        const isActive = name === companyFilter;
+      for (let i = 0; i < items.length; i++) {
+        const { label, value } = items[i];
+        const isActive = value === companyFilter;
+        const isNone = value === NO_COMPANY_FILTER;
         const opt = el('div', {
-          className: `sii-combo-opt${isActive ? ' active' : ''}`,
+          className: `sii-combo-opt${isActive ? ' active' : ''}${isNone ? ' sii-combo-opt-none' : ''}`,
           'data-idx': i,
+          'data-value': value,
           onMousedown(e) {
-            e.preventDefault(); // prevent blur
-            selectCompany(name);
+            e.preventDefault();
+            selectCompany(value, label);
           },
           onMouseenter() {
             if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
@@ -1424,14 +1443,14 @@
             _highlightedEl = opt;
             highlightIdx = i;
           },
-        }, name);
+        }, label);
         listBox.append(opt);
       }
     }
 
-    function selectCompany(name) {
-      companyFilter = name;
-      input.value = name;
+    function selectCompany(value, label) {
+      companyFilter = value;
+      input.value = label ?? value;
       wrapper.classList.add('has-value');
       wrapper.classList.remove('open');
       refreshActiveView();
@@ -1478,7 +1497,8 @@
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (highlightIdx >= 0 && opts[highlightIdx]) {
-          selectCompany(opts[highlightIdx].textContent);
+          const o = opts[highlightIdx];
+          selectCompany(o.dataset.value ?? o.textContent, o.textContent);
         }
       } else if (e.key === 'Escape') {
         wrapper.classList.remove('open');
@@ -1540,19 +1560,26 @@
       _highlightedEl = null;
       const q = (filter || '').toLowerCase();
       const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
-      if (!filtered.length) {
+      const items = [];
+      if (!q && getActiveConversations().some(c => !c.team_assignee_id)) {
+        items.push({ label: 'No team', value: NO_TEAM_FILTER });
+      }
+      for (const name of filtered) items.push({ label: name, value: name });
+      if (!items.length) {
         listBox.append(el('div', { className: 'sii-combo-empty' }, 'No matches'));
         return;
       }
-      for (let i = 0; i < filtered.length; i++) {
-        const name = filtered[i];
-        const isActive = name === teamFilter;
+      for (let i = 0; i < items.length; i++) {
+        const { label, value } = items[i];
+        const isActive = value === teamFilter;
+        const isNone = value === NO_TEAM_FILTER;
         const opt = el('div', {
-          className: `sii-combo-opt${isActive ? ' active' : ''}`,
+          className: `sii-combo-opt${isActive ? ' active' : ''}${isNone ? ' sii-combo-opt-none' : ''}`,
           'data-idx': i,
+          'data-value': value,
           onMousedown(e) {
             e.preventDefault();
-            selectTeam(name);
+            selectTeam(value, label);
           },
           onMouseenter() {
             if (_highlightedEl) _highlightedEl.classList.remove('highlighted');
@@ -1560,14 +1587,14 @@
             _highlightedEl = opt;
             highlightIdx = i;
           },
-        }, name);
+        }, label);
         listBox.append(opt);
       }
     }
 
-    function selectTeam(name) {
-      teamFilter = name;
-      input.value = name;
+    function selectTeam(value, label) {
+      teamFilter = value;
+      input.value = label ?? value;
       wrapper.classList.add('has-value');
       wrapper.classList.remove('open');
       refreshActiveView();
@@ -1612,7 +1639,8 @@
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (highlightIdx >= 0 && opts[highlightIdx]) {
-          selectTeam(opts[highlightIdx].textContent);
+          const o = opts[highlightIdx];
+          selectTeam(o.dataset.value ?? o.textContent, o.textContent);
         }
       } else if (e.key === 'Escape') {
         wrapper.classList.remove('open');
@@ -2105,8 +2133,8 @@
     const activeCount = convs.length - dismissedCount;
     const dismissedText = dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : '';
     const urgencyText = urgencyFilter ? ` · Urgency: ${urgencyFilter}` : '';
-    const companyText = companyFilter ? ` · Company: ${companyFilter}` : '';
-    const teamText    = teamFilter    ? ` · Team: ${teamFilter}`       : '';
+    const companyText = companyFilter ? ` · Company: ${companyFilter === NO_COMPANY_FILTER ? 'No company' : companyFilter}` : '';
+    const teamText    = teamFilter    ? ` · Team: ${teamFilter === NO_TEAM_FILTER ? 'No team' : teamFilter}`                 : '';
     f.textContent = '';
     const statusText = `${filterLabel(activeFilter)} · ${activeCount} active${dismissedText}${companyText}${teamText}${urgencyText} · Refreshed ${new Date().toLocaleTimeString()}`;
     f.append(statusText);
