@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.6
+// @version      2.9.7
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -30,7 +30,7 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
-  const SCRIPT_VERSION = '2.9.6';
+  const SCRIPT_VERSION = '2.9.7';
   const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
   const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
   const STORAGE_OPEN_ON_LOAD = 'sii_open_on_load';
@@ -764,7 +764,7 @@
     });
   }
 
-  function getActiveConversations() {
+  function getActiveConversations({ skipCompany = false, skipTeam = false } = {}) {
     let convs;
     if (activeFilter === F_SLA_WARNING) convs = slaWarning(datasets[F_BACKLOG]);
     else if (activeFilter === F_SLA_BREACHED) convs = slaBreached(datasets[F_BACKLOG]);
@@ -774,7 +774,7 @@
       convs = convs.filter(c => String(getUrgency(c) ?? '') === urgencyFilter);
     }
 
-    if (companyFilter !== null) {
+    if (companyFilter !== null && !skipCompany) {
       if (companyFilter === NO_COMPANY_FILTER) {
         convs = convs.filter(c => !convCompanyMap[String(c.id)]);
       } else {
@@ -782,7 +782,7 @@
       }
     }
 
-    if (teamFilter !== null) {
+    if (teamFilter !== null && !skipTeam) {
       if (teamFilter === NO_TEAM_FILTER) {
         convs = convs.filter(c => !c.team_assignee_id);
       } else {
@@ -808,15 +808,18 @@
     renderList(convs);
     renderFooter(convs);
 
-    // Only rebuild filter UIs when available options actually change
-    const companyKeys = getCompanyValues(convs).join('\0');
-    if (companyKeys !== _lastCompanyKeys) { _lastCompanyKeys = companyKeys; renderCompanyFilter(); }
+    // Only rebuild filter UIs when available options actually change.
+    // Use pre-own-filter convs so the filter box stays visible after selecting "No X".
+    const companyBaseConvs = companyFilter !== null ? getActiveConversations({ skipCompany: true }) : convs;
+    const companyKeys = getCompanyValues(companyBaseConvs).join('\0');
+    if (companyKeys !== _lastCompanyKeys) { _lastCompanyKeys = companyKeys; renderCompanyFilter(companyBaseConvs); }
 
     const urgencyKeys = [...new Set(convs.map(c => getUrgency(c) ?? ''))].sort().join('\0');
     if (urgencyKeys !== _lastUrgencyKeys) { _lastUrgencyKeys = urgencyKeys; renderUrgencyFilter(); }
 
-    const teamKeys = getTeamValues(convs).join('\0');
-    if (teamKeys !== _lastTeamKeys) { _lastTeamKeys = teamKeys; renderTeamFilter(); }
+    const teamBaseConvs = teamFilter !== null ? getActiveConversations({ skipTeam: true }) : convs;
+    const teamKeys = getTeamValues(teamBaseConvs).join('\0');
+    if (teamKeys !== _lastTeamKeys) { _lastTeamKeys = teamKeys; renderTeamFilter(teamBaseConvs); }
 
     const dataSep = document.getElementById('sii-data-sep');
     if (dataSep) dataSep.style.display = (companyKeys || teamKeys) ? '' : 'none';
@@ -1382,12 +1385,12 @@
     return [...names].sort((a, b) => a.localeCompare(b));
   }
 
-  function renderCompanyFilter() {
+  function renderCompanyFilter(baseConvs) {
     const container = document.getElementById('sii-company-filter');
     if (!container) return;
     container.innerHTML = '';
 
-    const allNames = getCompanyValues();
+    const allNames = getCompanyValues(baseConvs ?? getActiveConversations());
     if (allNames.length === 0) return;
 
     let highlightIdx = -1;
@@ -1398,7 +1401,7 @@
     input.type = 'text';
     input.className = 'sii-combo-input';
     input.placeholder = 'All companies';
-    input.value = companyFilter || '';
+    input.value = companyFilter === NO_COMPANY_FILTER ? 'No company' : (companyFilter || '');
 
     const clearBtn = el('button', { className: 'sii-combo-clear', onClick(e) {
       e.stopPropagation();
@@ -1417,7 +1420,8 @@
       const q = (filter || '').toLowerCase();
       const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
       const items = [];
-      if (!q && getActiveConversations().some(c => !convCompanyMap[String(c.id)])) {
+      const base = baseConvs ?? getActiveConversations();
+      if (!q && base.some(c => !convCompanyMap[String(c.id)])) {
         items.push({ label: 'No company', value: NO_COMPANY_FILTER });
       }
       for (const name of filtered) items.push({ label: name, value: name });
@@ -1526,12 +1530,12 @@
     return [...names].sort((a, b) => a.localeCompare(b));
   }
 
-  function renderTeamFilter() {
+  function renderTeamFilter(baseConvs) {
     const container = document.getElementById('sii-team-filter');
     if (!container) return;
     container.innerHTML = '';
 
-    const allNames = getTeamValues();
+    const allNames = getTeamValues(baseConvs ?? getActiveConversations());
     if (allNames.length === 0) return;
 
     let highlightIdx = -1;
@@ -1542,7 +1546,7 @@
     input.type = 'text';
     input.className = 'sii-combo-input';
     input.placeholder = 'All teams';
-    input.value = teamFilter || '';
+    input.value = teamFilter === NO_TEAM_FILTER ? 'No team' : (teamFilter || '');
 
     const clearBtn = el('button', { className: 'sii-combo-clear', onClick(e) {
       e.stopPropagation();
@@ -1561,7 +1565,8 @@
       const q = (filter || '').toLowerCase();
       const filtered = q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames;
       const items = [];
-      if (!q && getActiveConversations().some(c => !c.team_assignee_id)) {
+      const base = baseConvs ?? getActiveConversations();
+      if (!q && base.some(c => !c.team_assignee_id)) {
         items.push({ label: 'No team', value: NO_TEAM_FILTER });
       }
       for (const name of filtered) items.push({ label: name, value: name });
