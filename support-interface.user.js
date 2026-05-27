@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.7
+// @version      2.9.8
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -30,7 +30,7 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
-  const SCRIPT_VERSION = '2.9.7';
+  const SCRIPT_VERSION = '2.9.8';
   const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
   const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
   const STORAGE_OPEN_ON_LOAD = 'sii_open_on_load';
@@ -279,6 +279,7 @@
 
   let teamsMap = null;      // id → name, loaded once
   let adminsMap = null;     // id → name, loaded once
+  let hippAdminIds = null;  // Set of admin IDs with @hipp.health email
   let companiesMap = null;  // id → name, loaded once
   let convCompanyMap = {};   // conv_id → company name
   let convResponsesMap = {}; // conv_id → number of admin replies
@@ -290,6 +291,7 @@
     const resp = await apiRequest({ path: '/admins' });
     cachedAdmins = (resp.admins ?? resp.data ?? []).filter(a => a.type === 'admin');
     adminsMap = Object.fromEntries(cachedAdmins.map(a => [String(a.id), a.name]));
+    hippAdminIds = new Set(cachedAdmins.filter(a => a.email?.endsWith('@hipp.health')).map(a => String(a.id)));
     return cachedAdmins;
   }
 
@@ -400,10 +402,10 @@
     }
   }
 
-  function isAdminPublicReply(part, adminIdStr) {
-    if (part.author?.type !== 'admin') return false;           // excludes bots (Fin), users
-    if (String(part.author?.id) !== adminIdStr) return false;  // not this admin
-    if (part.part_type === 'note') return false;               // internal notes
+  function isAdminPublicReply(part) {
+    if (part.author?.type !== 'admin') return false;  // excludes bots (Fin), users
+    if (!hippAdminIds?.has(String(part.author?.id))) return false;  // not a @hipp.health admin
+    if (part.part_type === 'note') return false;      // internal notes
     // A real reply has message body content; system events (assignments, tags, etc.) don't
     const body = part.body;
     if (!body || !body.replace(/<[^>]+>/g, '').trim()) return false;
@@ -411,7 +413,6 @@
   }
 
   async function resolveConvResponses(convs, merge = false) {
-    const adminIdStr = String(currentAdminId);
     if (!merge) convResponsesMap = {};
     const ids = convs.map(c => String(c.id)).filter(id => !merge || !convResponsesMap.hasOwnProperty(id));
     if (!ids.length) return;
@@ -425,10 +426,10 @@
         if (result.status !== 'fulfilled') return;
         const detail = result.value;
         const parts = detail.conversation_parts?.conversation_parts ?? [];
-        let count = parts.filter(p => isAdminPublicReply(p, adminIdStr)).length;
-        // Also check the source/initial message — if this admin started the conversation, that counts
+        let count = parts.filter(p => isAdminPublicReply(p)).length;
+        // Also check the source/initial message — if a @hipp.health admin started it, that counts
         const src = detail.source;
-        if (src?.author?.type === 'admin' && String(src.author?.id) === adminIdStr) {
+        if (src?.author?.type === 'admin' && hippAdminIds?.has(String(src.author?.id))) {
           count++;
         }
         convResponsesMap[batch[idx]] = count;
@@ -2578,7 +2579,7 @@
     _w.siiInspect = async (...ids) => {
       if (!ids.length) { console.log('[SII] Usage: siiInspect(123456, 789012)'); return; }
       const adminIdStr = String(currentAdminId);
-      console.log(`[SII] Inspecting ${ids.length} conversation(s)… Admin ID: ${adminIdStr}`);
+      console.log(`[SII] Inspecting ${ids.length} conversation(s)… Admin ID: ${adminIdStr} | hipp team IDs: ${[...(hippAdminIds ?? [])].join(', ')}`);
       for (const id of ids) {
         try {
           const detail = await apiRequest({ path: `/conversations/${id}` });
@@ -2588,12 +2589,12 @@
           console.log('Statistics:', detail.statistics);
           console.log(`last_admin_reply_at: ${detail.statistics?.last_admin_reply_at ? new Date(detail.statistics.last_admin_reply_at * 1000).toISOString() : 'null'}`);
           const src = detail.source;
-          const srcIsYours = src?.author?.type === 'admin' && String(src.author?.id) === adminIdStr;
-          console.log(`Source: ${srcIsYours ? '✅ YOURS' : '—'} | author.type="${src?.author?.type}" author.id="${src?.author?.id}" author.name="${src?.author?.name}"`);
+          const srcIsHipp = src?.author?.type === 'admin' && hippAdminIds?.has(String(src.author?.id));
+          console.log(`Source: ${srcIsHipp ? '✅ HIPP' : '—'} | author.type="${src?.author?.type}" author.id="${src?.author?.id}" author.name="${src?.author?.name}"`);
           parts.forEach((p, idx) => {
-            const counted = isAdminPublicReply(p, adminIdStr);
-            const isYours = p.author?.type === 'admin' && String(p.author?.id) === adminIdStr;
-            const tag = counted ? '✅ COUNTED' : isYours ? '⚠️ YOURS (excluded: ' + p.part_type + ')' : '—';
+            const counted = isAdminPublicReply(p);
+            const isHipp = p.author?.type === 'admin' && hippAdminIds?.has(String(p.author?.id));
+            const tag = counted ? '✅ COUNTED' : isHipp ? '⚠️ HIPP (excluded: ' + p.part_type + ')' : '—';
             const ts = p.created_at ? new Date(p.created_at * 1000).toISOString() : 'no timestamp';
             console.log(`  [${idx}] ${tag} | type="${p.part_type}" | author.type="${p.author?.type}" author.id="${p.author?.id}" author.name="${p.author?.name}" | created=${ts}`);
           });
