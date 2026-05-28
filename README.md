@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.9.8-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.9.9-blue)
 
 ## Install
 
@@ -70,6 +70,9 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.9.9
+- **Strip HTML from subject/preview** — subjects containing HTML tags (e.g. `<p>Clinical Exports</p>`) now display as plain text
 
 ### v2.9.8
 - **Responses column counts all @hipp.health admins** — the Responses column now counts public replies from any team member with a @hipp.health email, not just the currently selected admin

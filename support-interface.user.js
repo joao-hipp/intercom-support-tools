@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.8
+// @version      2.9.9
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -30,7 +30,7 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
-  const SCRIPT_VERSION = '2.9.8';
+  const SCRIPT_VERSION = '2.9.9';
   const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
   const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
   const STORAGE_OPEN_ON_LOAD = 'sii_open_on_load';
@@ -937,7 +937,8 @@
   }
 
   function getSubject(conv) {
-    return conv.source?.subject || conv.source?.body?.replace(/<[^>]+>/g, '').trim().slice(0, 80) || '(no subject)';
+    const subject = conv.source?.subject?.replace(/<[^>]+>/g, '').trim();
+    return subject || conv.source?.body?.replace(/<[^>]+>/g, '').trim().slice(0, 80) || '(no subject)';
   }
 
   function getUrgency(conv) {
