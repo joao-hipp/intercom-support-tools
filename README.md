@@ -2,7 +2,7 @@
 
 A personal queue health dashboard for Intercom — gives support engineers a quick overview of their backlog, SLA status, assignments, replies, and closed conversations without leaving the inbox.
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.9.9-blue)
+![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-green) ![Version](https://img.shields.io/badge/version-2.9.10-blue)
 
 ## Install
 
@@ -70,6 +70,10 @@ Click the **⚙ Settings** button inside the dashboard to:
 The script runs inside Intercom's web app via Tampermonkey. You provide your Intercom API token once via Settings, and the script queries the Intercom API to build your personal dashboard. All data stays in your browser — nothing is sent to any third-party server.
 
 ## Changelog
+
+### v2.9.10
+- **Fix "Replied Today" counting yesterday's data** — the day/week boundaries (`TODAY_START_S`, `WEEK_START_S`) were computed once at script load and frozen. On a long-lived Intercom tab that crossed midnight, auto-refresh kept counting since *yesterday's* midnight. Boundaries are now recomputed on every data load, so "Today" / "since Sunday" filters stay accurate without a page reload.
+- **SLA status now mirrors Intercom exactly** — the SLA column shows only the values Intercom actually returns: **Active**, **Hit**, **Missed**, or **No SLA** (a removed SLA, `sla_status: null`, now correctly reads "No SLA" instead of the misleading "Active"). Dropped the never-triggered "Cancelled" branch and the derived countdown/"Breached" wording. The **SLA Breached** card is renamed **SLA Missed** to match Intercom's term.
 
 ### v2.9.9
 - **Strip HTML from subject/preview** — subjects containing HTML tags (e.g. `<p>Clinical Exports</p>`) now display as plain text

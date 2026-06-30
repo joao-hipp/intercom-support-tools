@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Support Intercom Interface
 // @namespace    https://app.intercom.com
-// @version      2.9.9
+// @version      2.9.10
 // @description  Personal queue health dashboard
 // @author       joao@hipp.health, guilherme@hipp.health
 // @match        https://app.intercom.com/*
@@ -30,7 +30,7 @@
   const DEFAULT_REFRESH_MINS = 30;
   const TWO_HOURS_S = 7200;
   const NOW_S = () => Math.floor(Date.now() / 1000);
-  const SCRIPT_VERSION = '2.9.9';
+  const SCRIPT_VERSION = '2.9.10';
   const UPDATE_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.meta.js';
   const DOWNLOAD_URL = 'https://raw.githubusercontent.com/joao-hipp/intercom-support-tools/main/support-interface.user.js';
   const STORAGE_OPEN_ON_LOAD = 'sii_open_on_load';
@@ -48,16 +48,20 @@
     return Math.floor((sp.getTime() + diff) / 1000);
   };
 
-  const TODAY_START_S = spMidnight();
-
-  const WEEK_START_S = (() => {
+  // Start of the current week (Sunday) midnight in São Paulo, as a UTC epoch (seconds).
+  const spWeekStart = () => {
     const now = new Date();
     const sp = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
     sp.setHours(0, 0, 0, 0);
     sp.setDate(sp.getDate() - sp.getDay());
     const diff = now.getTime() - new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getTime();
     return Math.floor((sp.getTime() + diff) / 1000);
-  })();
+  };
+
+  // IMPORTANT: "today" / "this week" boundaries must be computed fresh on every
+  // data load, not frozen at script start. The Intercom tab is long-lived and
+  // auto-refreshes on an interval, so a tab left open across midnight would
+  // otherwise keep counting yesterday's replies as "today". See loadAllDatasets.
 
   const F_BACKLOG          = 'backlog';
   const F_SLA_BREACHED     = 'slaBreached';
@@ -78,7 +82,7 @@
   const ALL_FILTER_CARDS = [
     { key: F_BACKLOG,        label: null,                  sub: 'open conversations', cls: '',        required: true  },
     { key: F_ALL_OPEN,       label: 'All Open',            sub: 'all conversations',  cls: 'teal',    required: false },
-    { key: F_SLA_BREACHED,   label: 'SLA Breached',        sub: 'past deadline',      cls: 'danger',  required: false },
+    { key: F_SLA_BREACHED,   label: 'SLA Missed',          sub: 'missed deadline',    cls: 'danger',  required: false },
     { key: F_SLA_WARNING,    label: 'SLA Warning',         sub: '< 2h remaining',     cls: 'warning', required: false },
     { key: F_UNASSIGNED,     label: 'Unassigned',          sub: 'no assignee',        cls: 'teal',    required: false },
     { key: F_ASSIGNED_TODAY, label: 'Assigned Today',      sub: 'new assignments',    cls: 'info',    required: false },
@@ -638,6 +642,11 @@
     const adminId = parseInt(currentAdminId, 10);
     const notify = onProgress || (() => {});
 
+    // Recompute day/week boundaries on every load so a long-lived tab that
+    // crosses midnight (or Sunday) doesn't keep using stale boundaries.
+    const TODAY_START_S = spMidnight();
+    const WEEK_START_S  = spWeekStart();
+
     // --- Phase 1: fire all search queries in parallel ---
     const backlogP = fetchAllConvs([
       { field: 'state', operator: '=', value: 'open' },
@@ -891,42 +900,19 @@
   // Formatting helpers
   // ---------------------------------------------------------------------------
 
-  function getSlaBreachTs(sla) {
-    // Try every known field name Intercom uses across API versions
-    return sla.next_breach_at || sla.breach_at || sla.sla_breach_at
-      || sla.next_breach || sla.due_at || null;
-  }
-
   function fmtSla(conv) {
     // sla_applied can be an object or a 1-element array depending on API version
     let sla = conv.sla_applied;
     if (Array.isArray(sla)) sla = sla[0] ?? null;
-    const now = NOW_S();
-    if (!sla) return { label: 'No SLA', cls: 'none' };
-    const breachTs = getSlaBreachTs(sla);
-    const status   = sla.sla_status;
-
-    if (status === 'missed') {
-      const over = breachTs ? fmtDur(now - breachTs) : null;
-      return { label: over ? `Breached ${over} ago` : 'Breached', cls: 'breached' };
+    // Intercom's sla_status is one of: 'active', 'hit', 'missed', or null
+    // (null = the SLA was removed from the conversation). We surface those
+    // verbatim and treat null / no SLA the same — "No SLA". Nothing derived.
+    switch (sla?.sla_status) {
+      case 'missed': return { label: 'Missed', cls: 'breached' };
+      case 'hit':    return { label: 'Hit',    cls: 'ok' };
+      case 'active': return { label: 'Active', cls: 'ok' };
+      default:       return { label: 'No SLA', cls: 'none' };
     }
-    if (status === 'cancelled') return { label: 'Cancelled', cls: 'none' };
-    if (status === 'hit') {
-      // Show how far past the deadline it was met, if we have the timestamp
-      return { label: breachTs ? `Met (${fmtDur(Math.abs(breachTs - now))})` : 'Met', cls: 'ok' };
-    }
-    // Active (or unknown status)
-    if (breachTs) {
-      const rem = breachTs - now;
-      if (rem <= 0) return { label: `Breached ${fmtDur(-rem)} ago`, cls: 'breached' };
-      return { label: fmtDur(rem), cls: rem <= TWO_HOURS_S ? 'warning' : 'ok' };
-    }
-    return { label: 'Active', cls: 'ok' };
-  }
-
-  function fmtDur(s) {
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
   }
 
   function fmtDate(ts) {
